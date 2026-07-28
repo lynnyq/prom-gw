@@ -1,0 +1,42 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - gofmt
+    - goimports
+    - gosec
+    - gocognit
+    - ineffassign
+    - unused
+    - misspell
+
+linters-settings:
+  gocognit:
+    min-complexity: 30
+  goimports:
+    local-prefixes: github.com/lynnyq/bigdata
+  gosec:
+    severity: medium
+    confidence: medium
+  misspell:
+    locale: US
+  gofmt:
+    simplify: true
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    - path: internal/wal/
+      linters:
+        - gocognit  # WAL 写盘逻辑复杂度可接受
+  max-issues-per-linter: 0
+  max-same-issues: 0

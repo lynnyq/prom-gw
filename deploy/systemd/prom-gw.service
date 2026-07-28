@@ -1,0 +1,56 @@
+[Unit]
+Description=Prometheus RemoteWrite Gateway (prom-gw)
+Documentation=https://github.com/lynnyq/bigdata
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=prom-gw
+Group=prom-gw
+ExecStart=/opt/prom-gw/bin/prom-gw --config=/etc/prom-gw/config.yaml --tokens=/etc/prom-gw/tokens.yaml
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=65535
+LimitCORE=infinity
+MemoryMax=8G
+TasksMax=8192
+
+# 优雅停机
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+FinalKillSignal=SIGKILL
+
+# 环境
+Environment=GOMAXPROCS=8
+Environment=GOMEMLIMIT=6GiB
+EnvironmentFile=-/etc/prom-gw/prom-gw.env
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/wal /var/log/prom-gw
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+# 日志走 journald,JSON 由 prom-gw 自行输出
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=prom-gw
+
+[Install]
+WantedBy=multi-user.target

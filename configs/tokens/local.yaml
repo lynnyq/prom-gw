@@ -1,0 +1,15 @@
+# 本地 Token 列表,启动时加载、SIGHUP 重载。
+# tenant_id 预留未来 IAM 主键,v1 可不填。
+# 注意: 此文件可入仓(开发 / 测试用),生产请用 configs/tokens.local.yaml(.gitignore 已排除)。
+tokens:
+  "tk_app_business_dev":
+    tenant: app-business
+    tenant_id: "1001"
+    default_topic: prom.raw.app_business
+    rate_limit: 80000
+
+  "tk_infra_dev":
+    tenant: infra
+    tenant_id: "1002"
+    default_topic: prom.raw.infra
+    rate_limit: 50000

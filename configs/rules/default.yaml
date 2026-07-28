@@ -1,0 +1,7 @@
+# Default empty ruleset,作为后续 Phase 1 透传 / Phase 2+ 规则引擎的基础。
+# 重启后从 Nacos / 本地 YAML 加载真实配置;这里只保证程序可启动。
+rulesets: []
+
+global:
+  rate_limit_per_instance: 100000
+  channel_buffer: 65535
