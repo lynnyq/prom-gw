@@ -1,0 +1,17 @@
+---
+# playbooks/rollback.yml
+# 一键回滚到 `prom_gw_rollback_version`(默认上一版本)。
+# 流程:停当前实例 → 拉取回滚版本产物 → 起服 → 健康检查。
+#
+# 用法:
+#   ansible-playbook -i inventory/production.ini playbooks/rollback.yml
+#   ansible-playbook ... -e prom_gw_rollback_version=v0.9.0
+---
+- name: Rollback prom-gw
+  hosts: prom_gw
+  serial: 1
+  vars:
+    prom_gw_rollback_version: "{{ prom_gw_rollback_version | default('') }}"
+  roles:
+    - role: prom_gw
+      tags: rollback

@@ -11,6 +11,7 @@ import (
 )
 
 func TestGo_DoesNotCrashOnPanic(t *testing.T) {
+	before := Stats()
 	done := make(chan struct{})
 	Go("panic-test", func() {
 		defer close(done)
@@ -23,7 +24,9 @@ func TestGo_DoesNotCrashOnPanic(t *testing.T) {
 		t.Fatal("goroutine did not return after panic")
 	}
 
-	assert.Equal(t, uint64(1), Stats(), "panic should be recorded")
+	// close(done) 是 fn() 的 defer,recordPanic 是 runSafe 外层 defer,
+	// LIFO 顺序下 close 先于 recordPanic 触发,故需要轮询等待计数刷新。
+	require.Eventually(t, func() bool { return Stats() >= before+1 }, time.Second, 10*time.Millisecond, "panic should be recorded")
 }
 
 func TestGoWithRecover_CallbackInvoked(t *testing.T) {

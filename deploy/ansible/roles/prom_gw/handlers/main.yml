@@ -1,0 +1,10 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: restart prom-gw
+  ansible.builtin.systemd:
+    name: "prom-gw@{{ item }}"
+    state: restarted
+  loop: "{{ prom_gw_instances | map(attribute='name') | list }}"

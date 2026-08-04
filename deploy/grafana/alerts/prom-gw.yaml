@@ -1,0 +1,157 @@
+# prom-gw Prometheus 告警规则
+#
+# 加载方式:在 prometheus.yml 的 rule_files 引入本文件
+#
+#   rule_files:
+#     - /etc/prometheus/rules/prom-gw.yaml
+#
+# 告警分级:
+#   - critical:5 分钟内出现 → 立即处理
+#   - warning:持续 10 分钟 → 需要排查
+#   - info:仅作监控参考
+#
+# 所有告警的 metric 标签均带 severity,便于 Alertmanager 路由分级。
+
+groups:
+  # ====== 错误 / 健康度 ======
+  - name: prom-gw-errors
+    interval: 30s
+    rules:
+      - alert: PromGwHighErrorRate
+        expr: |
+          (
+            sum(rate(gateway_errors_total[5m]))
+            /
+            clamp_min(sum(rate(gateway_samples_total[5m])), 1)
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          service: prom-gw
+        annotations:
+          summary: "prom-gw 错误率 > 1% 持续 5 分钟"
+          description: |
+            当前错误率 {{ $value | humanizePercentage }} > 1%。
+            检查 gateway_errors_total{stage,type} 看哪类错误突增。
+          runbook: "docs/operations/runbook.md#high-error-rate"
+
+      - alert: PromGwRequestErrors
+        expr: |
+          sum(rate(gateway_request_duration_seconds_count{status=~"4xx|5xx"}[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "prom-gw 4xx/5xx 持续 > 10/s"
+          description: |
+            异常响应持续超过 5 分钟。当前速率 {{ $value }} req/s。
+            检查 auth/limit/backpressure 哪个在打。
+
+      - alert: PromGwAuthFailSpike
+        expr: sum(rate(gateway_auth_fail_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "鉴权失败激增 (> 50/s 持续 5m)"
+          description: |
+            鉴权失败突增,可能是 token 失效或配置问题。
+            检查 token 列表和 reason label。
+
+  # ====== 性能 ======
+  - name: prom-gw-perf
+    interval: 30s
+    rules:
+      - alert: PromGwP99LatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(gateway_request_duration_seconds_bucket{endpoint="/api/v1/write",status="ok"}[5m]))
+          ) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "p99 延迟 > 1s 持续 5m"
+          description: |
+            当前 p99 = {{ $value | humanizeDuration }}。
+            可能原因:Kafka 慢 / pipeline 积压 / 规则引擎慢。
+            查看 gateway_stage_duration_seconds 定位瓶颈。
+
+  # ====== 背压 / 容量 ======
+  - name: prom-gw-capacity
+    interval: 30s
+    rules:
+      - alert: PromGwBackpressureHigh
+        expr: sum(rate(gateway_backpressure_rejected_total[1m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "持续 503 背压拒绝"
+          description: |
+            速率 {{ $value }} req/s。
+            下游(Kafka)消费跟不上,需扩容 / 优化 Kafka。
+
+  # ====== WAL ======
+  - name: prom-gw-wal
+    interval: 30s
+    rules:
+      - alert: PromGwWalOldestTooOld
+        expr: gateway_wal_oldest_age_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "WAL 最老 segment 存活 > 60s"
+          description: |
+            Kafka 长时间未 ack。最老数据 = {{ $value }}s 前。
+            检查 Kafka 集群 / 网络可达性。
+
+      - alert: PromGwWalHardReject
+        expr: increase(gateway_wal_hard_reject_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          service: prom-gw
+        annotations:
+          summary: "WAL 触发硬拒绝"
+          description: |
+            5 分钟内出现 {{ $value }} 次硬拒绝。
+            磁盘满或 WAL 字节超 max_bytes,需立即清理或扩容。
+
+  # ====== 配置 ======
+  - name: prom-gw-config
+    interval: 1m
+    rules:
+      - alert: PromGwConfigReloadFailed
+        expr: sum(increase(gateway_config_reload_total{status="error"}[10m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "配置热重载失败"
+          description: |
+            10 分钟内出现 {{ $value }} 次失败重载。
+            检查 Nacos 状态 / 文件格式。
+
+  # ====== 资源 ======
+  - name: prom-gw-resource
+    interval: 30s
+    rules:
+      - alert: PromGwGoroutineLeak
+        expr: gateway_goroutines > 5000
+        for: 10m
+        labels:
+          severity: warning
+          service: prom-gw
+        annotations:
+          summary: "Goroutine 数量异常 > 5000 持续 10m"
+          description: |
+            当前 {{ $value }} goroutines,可能存在泄漏。
+            跑 pprof 看 goroutine 堆栈。

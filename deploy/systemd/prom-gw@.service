@@ -1,5 +1,5 @@
 [Unit]
-Description=Prometheus RemoteWrite Gateway (prom-gw)
+Description=Prometheus RemoteWrite Gateway (city=%i)
 Documentation=https://github.com/lynnyq/bigdata
 After=network.target
 Wants=network-online.target
@@ -8,7 +8,17 @@ Wants=network-online.target
 Type=simple
 User=prom-gw
 Group=prom-gw
-ExecStart=/opt/prom-gw/bin/prom-gw --config=/etc/prom-gw/config.yaml --tokens=/etc/prom-gw/tokens.yaml
+# spec 9.1: 通过 systemd template 实例化,按城市分目录加载规则(spec 9.3)
+#   - prom-gw@bj.service -> /etc/prom-gw/config-bj.yaml
+#   - prom-gw@sz.service -> /etc/prom-gw/config-sz.yaml
+#   - prom-gw@hf.service -> /etc/prom-gw/config-hf.yaml
+Environment=INGEST_CITY=%i
+Environment=PROM_GW_CONFIG=/etc/prom-gw/config-%i.yaml
+Environment=PROM_GW_TOKENS=/etc/prom-gw/tokens.yaml
+ExecStart=/opt/prom-gw/bin/prom-gw \
+  --config=/etc/prom-gw/config-%i.yaml \
+  --tokens=/etc/prom-gw/tokens.yaml \
+  --ingest-city=%i
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=60

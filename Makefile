@@ -53,8 +53,16 @@ proto: ## 生成 protobuf
 codegen: ## OpenAPI -> chi router/types
 	@echo "(T4.7 实施时启用)"
 
-docs: ## 渲染 API 文档站
-	@echo "(T4.7 实施时启用)"
+docs: ## 渲染 API 文档站(优先 redocly,否则用 scripts/render-docs 生成占位页)
+	@$(GO) run ./scripts/validate-yaml -spec api/openapi/admin.yaml
+	@if command -v redocly >/dev/null 2>&1; then \
+		redocly build-docs api/openapi/admin.yaml --output docs/api/index.html; \
+	elif npx --no-install @redocly/cli >/dev/null 2>&1; then \
+		npx --no-install @redocly/cli build-docs api/openapi/admin.yaml --output docs/api/index.html; \
+	else \
+		echo "redocly not installed; using local fallback (scripts/render-docs)"; \
+		$(GO) run ./scripts/render-docs -spec api/openapi/admin.yaml -out docs/api/index.html; \
+	fi
 
 perf: build ## 性能压测(1.5M samples/s × 1h,默认 30s 冒烟)
 	$(GO) run ./test/perf --duration=30s

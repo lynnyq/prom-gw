@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>prom-gw Admin API</title>
+  <meta name="description" content="Admin &amp; ops API for `prom-gw` (multi-DC Prometheus RemoteWrite gateway). All endpoints live under `/v1` and require the request source IP to be in the configured allow-list (`--admin-allow-cidr`, default `127.0.0.1/32,10.0.0.0/8`). Responses follow the unified `Response{Code, Message, Data, TraceID}` envelope." />
+  <link href="https://fonts.googleapis.com/css?family=Montserrat:300,400,700|Roboto:300,400,700" rel="stylesheet" />
+  <style>
+    body { margin: 0; padding: 0; }
+  </style>
+</head>
+<body>
+  <div id="redoc-container"></div>
+  <script src="https://cdn.redocly.com/redoc/latest/bundles/redoc.standalone.js"></script>
+  <script>
+    Redoc.init({"info":{"title":"placeholder"},"x-spec-file":"openapi.yaml"}, {}, document.getElementById('redoc-container'));
+  </script>
+</body>
+</html>
+
+<p style="font-family:monospace;padding:1em">spec is YAML, please use <code>redocly build-docs api/openapi/admin.yaml</code> or load <a href="./openapi.yaml">openapi.yaml</a> via Swagger UI.</p>

@@ -1,0 +1,9 @@
+---
+# playbooks/site.yml
+# 顶层入口:统一执行 deploy + healthcheck 流程。
+#
+# 用法:
+#   ansible-playbook -i inventory/production.ini playbooks/site.yml
+---
+- import_playbook: deploy.yml
+- import_playbook: healthcheck.yml

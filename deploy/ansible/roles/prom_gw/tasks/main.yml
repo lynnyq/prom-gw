@@ -1,0 +1,62 @@
+---
+# roles/prom_gw/tasks/main.yml
+# prom-gw 角色主任务:安装/启动/健康检查。
+# 真实部署时需补齐:release 产物下载、systemd 单元、config 渲染等。
+- name: Ensure release dir exists
+  ansible.builtin.file:
+    path: "{{ prom_gw_release_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure config dir exists
+  ansible.builtin.file:
+    path: "{{ prom_gw_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure WAL dir exists
+  ansible.builtin.file:
+    path: "{{ prom_gw_wal_dir }}"
+    state: directory
+    owner: promgw
+    group: promgw
+    mode: "0750"
+
+- name: Place systemd unit
+  ansible.builtin.template:
+    src: prom-gw.service.j2
+    dest: "/etc/systemd/system/prom-gw@.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload systemd
+
+- name: Render env file
+  ansible.builtin.template:
+    src: prom-gw.env.j2
+    dest: "{{ prom_gw_config_dir }}/prom-gw.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: restart prom-gw
+
+- name: Render default ruleset
+  ansible.builtin.template:
+    src: rules.default.yaml.j2
+    dest: "{{ prom_gw_config_dir }}/rules.yaml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart prom-gw
+
+- name: Enable and start prom-gw instance(s)
+  ansible.builtin.systemd:
+    name: "prom-gw@{{ item.name }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ prom_gw_instances }}"

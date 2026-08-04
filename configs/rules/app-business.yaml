@@ -1,0 +1,48 @@
+# app-business tenant 业务规则集示例
+# ----------------------------------------------------------------------------
+# 描述: app-business 租户的指标经过以下流水线清洗后投递到 Kafka
+#   1) relabel: 删除 env/instance 标签(噪音标签),保留 job/region/team
+#   2) route:   按 team 标签把数据路由到不同 topic;命中不到走 default_topic
+#   3) sample:  兜底按 0.1(10%)采样,降低下游存储压力
+#
+# 注:本文件作为 example / 测试 fixture,启动时不会自动加载,需在启动参数
+#    --rules-file 显式指向,或由 T2.10 watcher 监听到变化后热加载。
+# ----------------------------------------------------------------------------
+rulesets:
+  - name: app-business
+    tenant: app-business
+    source_topic: prom.raw.app_business
+    default_topic: prom.app_business.default
+    version: 1
+    match:
+      metric_prefix: ""        # 空 = 全量接收(若需只清洗 app_ 前缀指标,改为 "app_")
+    stages:
+      - type: relabel
+        config:
+          drop_labels:
+            - env
+            - instance
+            - pod
+          keep_labels: []      # 空 = 关闭白名单
+          label_map:
+            kubernetes_io_cluster: cluster      # 重命名示例
+
+      - type: route
+        config:
+          rules:
+            - match: { team: "core" }
+              topic: prom.app_business.core
+            - match: { team: "infra" }
+              topic: prom.app_business.infra
+            - match: { team: "data" }
+              topic: prom.app_business.data
+          # default_topic 缺失时由 compiler 自动注入到 RuleSet.DefaultTopic
+          # default_topic: prom.app_business.default
+
+      - type: sample
+        config:
+          rate: 0.1             # 10% 概率丢弃;生产环境可降到 0.01~0.05
+
+global:
+  rate_limit_per_instance: 100000
+  channel_buffer: 65535

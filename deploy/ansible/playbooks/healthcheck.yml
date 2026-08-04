@@ -1,0 +1,20 @@
+---
+# playbooks/healthcheck.yml
+# 健康检查入口:对每台机器的每个实例探测 /healthz 与 /readyz。
+# 用于部署后/滚动升级时验证。
+#
+# 用法:
+#   ansible-playbook -i inventory/production.ini playbooks/healthcheck.yml
+---
+- name: Healthcheck prom-gw
+  hosts: prom_gw
+  gather_facts: false
+  tasks:
+    - name: Probe /healthz and /readyz for each instance
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ item.1.health_port }}/healthz"
+        status_code: 200
+        timeout: 5
+      loop: "{{ query('inventory_hostnames', 'prom_gw') | product(prom_gw_instances) | list }}"
+      vars:
+        health_port: "{{ prom_gw_health_port + (item.0 | int) }}"

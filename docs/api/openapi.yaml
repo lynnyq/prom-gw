@@ -1,0 +1,515 @@
+openapi: 3.0.3
+info:
+  title: prom-gw Admin API
+  description: |
+    Admin & ops API for `prom-gw` (multi-DC Prometheus RemoteWrite gateway).
+    All endpoints live under `/v1` and require the request source IP to be
+    in the configured allow-list (`--admin-allow-cidr`, default
+    `127.0.0.1/32,10.0.0.0/8`). Responses follow the unified
+    `Response{Code, Message, Data, TraceID}` envelope.
+
+    业务约定:
+    - `code=0` 表示成功;`code != 0` 失败,`message` 必填
+    - 错误码 1000-1999 为公共错误,4000-4999 为 GW 业务错误
+    - 所有响应都带 `trace_id`(从 OTel ctx 拉取),便于链路追踪
+    - 请求体大小上限 4MB(`Content-Type` 必须是 `application/json` 或 `application/yaml`)
+  version: "1.0.0"
+  contact:
+    name: bigdata team
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: http://localhost:8082
+    description: Local admin server (default)
+
+tags:
+  - name: rulesets
+    description: 规则集管理(create / read / reload / rollback / history)
+  - name: tenants
+    description: 当前 token→tenant 映射
+  - name: stats
+    description: 运行时统计
+  - name: health
+    description: 健康检查
+
+paths:
+  /v1/healthz:
+    get:
+      tags: [health]
+      summary: 健康检查
+      description: |
+        返回 `{"status":"ok"}`,用于 LB / k8s liveness probe。
+        **注意**:本端点不检查依赖(无 Kafka 探活),仅表示 admin server 自身存活。
+        完整依赖检查见 receiver `:8081/readyz`。
+      responses:
+        "200":
+          description: admin server 存活
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResp"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/rulesets:
+    get:
+      tags: [rulesets]
+      summary: 列出全部 ruleset
+      description: |
+        返回所有已加载 ruleset 的 name + current version + stage count + 来源(nacos/file/api)。
+      responses:
+        "200":
+          description: 列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          rulesets:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/RuleSetSummary"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/rulesets/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [rulesets]
+      summary: 读单个 ruleset
+      description: 返回最新版本的 raw yaml + stage 数 + source。
+      responses:
+        "200":
+          description: 详情
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/RuleSetDetail"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [rulesets]
+      summary: 创建/替换 ruleset
+      description: |
+        提交新版本 ruleset。`version` 必须严格大于当前最新;否则 409。
+        内部会先编译,失败返回 400(码 4103)。
+        Body 两种格式二选一:
+        - `Content-Type: application/json`,body 为 `{"version":7,"raw_yaml":"..."}`
+        - `Content-Type: application/yaml`,`?version=N` 走 query,body 即 YAML 原文
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PutRuleSetReq"
+          application/yaml:
+            schema:
+              type: string
+              description: YAML 原文(query 走 ?version=N)
+      responses:
+        "200":
+          description: 提交成功,返回新 version
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          version:
+                            type: integer
+                            format: int64
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: YAML 中没有匹配的 `name` 字段
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnvelopedResponse"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/rulesets/{name}:reload:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [rulesets]
+      summary: 强制重载 ruleset
+      description: |
+        从当前 source(Nacos / File)重新拉一次并切到 pipeline。
+        如果 manager 当前激活的 ruleset 与 path 中 name 不同,会切到 manager 的实际 ruleset。
+      responses:
+        "200":
+          description: 重载成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          reloaded:
+                            type: string
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/rulesets/{name}:rollback:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+      - in: query
+        name: to_version
+        required: true
+        schema:
+          type: integer
+          format: int64
+          minimum: 1
+        description: 目标 version(必须存在于 history)
+    post:
+      tags: [rulesets]
+      summary: 回滚到指定 version
+      description: |
+        从 history 取出指定 version,走校验 + 原子切换。
+        目标 version 必须存在于 history(码 4104),否则 404。
+      responses:
+        "200":
+          description: 回滚成功
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          rolled_back:
+                            type: string
+                          to_version:
+                            type: integer
+                            format: int64
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/rulesets/{name}/history:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [rulesets]
+      summary: 列出 ruleset 的历史版本
+      description: 按 version 倒序列出,最近 10 个版本(ring buffer)。
+      responses:
+        "200":
+          description: 历史版本
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          history:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/HistoryRecord"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/tenants:
+    get:
+      tags: [tenants]
+      summary: 列出当前 token→tenant 映射
+      description: |
+        返回当前 LocalTokenAuthenticator 中已加载的 tenant 元数据。
+        **不返回 token 明文**,只返回 name + tenant_id + default_topic + rate_limit。
+      responses:
+        "200":
+          description: tenant 列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          tenants:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/TenantInfo"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /v1/stats:
+    get:
+      tags: [stats]
+      summary: 运行时统计
+      description: |
+        per ruleset 统计:current version、by source 数量、history size、估算 drop rate。
+        drop rate 由 service 内累计的 `dropIn/dropOut` 计算,值域 `[0,1]`。
+      responses:
+        "200":
+          description: stats
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/EnvelopedResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/StatsResp"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+components:
+  parameters:
+    Name:
+      in: path
+      name: name
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+      description: ruleset name(对应 YAML `rulesets[].name`)
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+    Forbidden:
+      description: 来源 IP 不在白名单
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+    Conflict:
+      description: version 冲突 / name 冲突
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+    MethodNotAllowed:
+      description: 不支持的 HTTP 方法
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+    InternalError:
+      description: 内部错误(panic / 依赖失败)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnvelopedResponse"
+
+  schemas:
+    EnvelopedResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: |
+            业务码。`0` 成功;非 0 失败,枚举见下表:
+            | 码  | 含义 |
+            | --- | --- |
+            | 0 | 成功 |
+            | 1000 | 通用参数错误 |
+            | 1002 | 禁止(白名单) |
+            | 1003 | 资源不存在 |
+            | 1004 | 冲突 |
+            | 1500 | 内部错误 |
+            | 4101 | ruleset 不存在 |
+            | 4102 | ruleset version/name 冲突 |
+            | 4103 | ruleset YAML / 编译失败 |
+            | 4104 | rollback 目标 version 不存在 |
+            | 4105 | ruleset 应用失败 |
+        message:
+          type: string
+        data:
+          description: 业务数据(成功时存在)
+        trace_id:
+          type: string
+          description: OTel trace ID,十六进制,32 字符;无 trace 时为空
+
+    HealthResp:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    RuleSetSummary:
+      type: object
+      required: [name, version, stages, source]
+      properties:
+        name:
+          type: string
+        version:
+          type: integer
+          format: int64
+        stages:
+          type: integer
+          description: 当前 ruleset 包含的 stage 数
+        source:
+          type: string
+          enum: [nacos, file, api, default]
+          description: 当前版本来源
+
+    RuleSetDetail:
+      type: object
+      required: [name, version, stages, source]
+      properties:
+        name:
+          type: string
+        version:
+          type: integer
+          format: int64
+        default_topic:
+          type: string
+        stages:
+          type: integer
+        raw_yaml:
+          type: string
+          description: 原始 YAML 文本
+        source:
+          type: string
+          enum: [nacos, file, api, default]
+
+    PutRuleSetReq:
+      type: object
+      required: [version, raw_yaml]
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 新 version,必须严格大于当前最新
+        raw_yaml:
+          type: string
+          minLength: 1
+          maxLength: 4194304
+          description: YAML 原文,最大 4MB
+
+    HistoryRecord:
+      type: object
+      required: [name, version]
+      properties:
+        name:
+          type: string
+        version:
+          type: integer
+          format: int64
+        bytes:
+          type: integer
+          description: raw YAML 字节数
+        raw_yaml:
+          type: string
+          description: 仅最近 1 版保留原文;更早版本只保留 metadata
+        source:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        compiled:
+          description: 编译产物(不直接对外,内部使用)
+          type: object
+          nullable: true
+
+    TenantInfo:
+      type: object
+      required: [tenant, default_topic, rate_limit]
+      properties:
+        tenant:
+          type: string
+        tenant_id:
+          type: string
+          description: IAM 主键,本地模式可能为空
+        default_topic:
+          type: string
+        rate_limit:
+          type: integer
+          description: per-tenant 限流(samples/s)
+
+    StatsResp:
+      type: object
+      required: [by_source, history_size]
+      properties:
+        current_ruleset:
+          type: string
+        current_version:
+          type: integer
+          format: int64
+        by_source:
+          type: object
+          additionalProperties:
+            type: integer
+          description: source→count 映射
+        history_size:
+          type: integer
+        drop_rate_estimate:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: 估算 drop 比例(0~1)

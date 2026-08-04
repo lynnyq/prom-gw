@@ -1,0 +1,16 @@
+# 合肥(hf)机房默认规则集
+#
+# 加载方式(spec 9.1 + 9.3):
+#   - prom-gw@hf.service 启动时通过 INGEST_CITY=hf + --config 指向本文件
+#   - 推荐 Ansible 部署时用变量替换:
+#       prom_gw_config: "configs/rules/{{ city }}/default.yaml"
+#
+# 设计原则(spec 4.4):
+#   - topic 命名 prom.hf.<stage>.<tenant>,避免跨城运维误操作
+#   - 默认只透传,业务规则由各团队 PR 添加
+rulesets:
+  - name: hf-default
+    tenant: hf
+    default_topic: prom.hf.default
+    version: 1
+    stages: []
