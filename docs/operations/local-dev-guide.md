@@ -146,6 +146,9 @@ log.dirs=/tmp/kafka-logs-local
 num.partitions=4
 default.replication.factor=1
 min.insync.replicas=1
+# 内部 topic 副本数(单机必须改为 1,否则 __consumer_offsets 创建失败导致消费卡死)
+offsets.topic.replication.factor=1
+transaction.state.log.replication.factor=1
 log.retention.hours=24
 log.segment.bytes=104857600
 log.cleanup.policy=delete
@@ -1076,6 +1079,7 @@ bin/kafka-storage.sh format \
 | 写入返回 400 | snappy 解码失败,检查 `Content-Encoding: snappy` header |
 | 写入返回 503 | 背压,Kafka 慢或 pipeline channel 满 |
 | Kafka 消费无数据 | Topic 未创建,或路由规则不匹配 |
+| 日志反复刷 `Sent auto-creation request for Set(__consumer_offsets)` 且 consumer 拉不到消息 | 单机未设置内部 topic 副本数为 1,`__consumer_offsets` 默认 replication=3 无法创建。确认 `local.properties` 已设置 `offsets.topic.replication.factor=1` 和 `transaction.state.log.replication.factor=1`(见 §3.2) |
 | `gateway_wal_bytes` 持续增长 | Kafka 故障,检查 `gateway_errors_total{stage="kafka"}` |
 | Prometheus remote_write 失败 | 检查 `prometheus_remote_storage_samples_failed_total` |
 | Kafka 启动报 `Cluster ID 不匹配` | 重新格式化(见 9.3) |
@@ -1084,6 +1088,8 @@ bin/kafka-storage.sh format \
 ### D. 相关文档
 
 - [生产部署指南](production-guide.md)
+- [参数与配置完整说明](configuration-reference.md)
+- [Flink 消费 Kafka 写 StarRocks 开发指南](flink-consumer-guide.md)
 - [部署速查](deploy.md)
 - [故障剧本](runbook.md)
 - [5 分钟接入](../user/quickstart.md)
