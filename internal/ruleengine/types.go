@@ -35,7 +35,8 @@ var (
 // 字段说明:
 //   - Name: 规则集唯一名
 //   - Tenant: 适用租户(v1 单 ruleset 全局生效,字段保留为多租户预留)
-//   - SourceTopic: 标记该 ruleset 处理哪类数据(仅 spec 文档,运行期不参与逻辑)
+//   - SourceTopic: 标记该 ruleset 处理哪类数据(仅 spec 文档,运行期不参与逻辑);
+//     YAML tag 为 input_topic(与 design §5.1 对齐),Go 字段名保留 SourceTopic 以减少改动
 //   - DefaultTopic: 没路由命中时的兜底 topic
 //   - Match: metric/label 命中条件(v1 仅按 metric 前缀匹配);空则全量接收
 //   - Stages: 按顺序执行的 stage 列表
@@ -43,7 +44,7 @@ var (
 type RuleSet struct {
 	Name         string  `yaml:"name" json:"name"`
 	Tenant       string  `yaml:"tenant,omitempty" json:"tenant,omitempty"`
-	SourceTopic  string  `yaml:"source_topic,omitempty" json:"source_topic,omitempty"`
+	SourceTopic  string  `yaml:"input_topic,omitempty" json:"source_topic,omitempty"`
 	DefaultTopic string  `yaml:"default_topic" json:"default_topic"`
 	Match        Match   `yaml:"match,omitempty" json:"match,omitempty"`
 	Stages       []Stage `yaml:"stages,omitempty" json:"stages,omitempty"`
@@ -74,9 +75,66 @@ func (m Match) Matches(s parser.Sample) bool {
 // 字段说明:
 //   - Type: 类型标识(relabel/route/sample)
 //   - Config: 阶段私有配置,使用通用 map 在编译期由 Compile 强类型化
+//
+// YAML 反序列化支持两种写法(design §5.1 inline + 旧版 config: 嵌套):
+//
+//  1. inline(推荐,与 design doc 一致):
+//     - type: relabel
+//     drop_labels: [pod]
+//     会被解析为 Config={"drop_labels":["pod"]}
+//
+//  2. config: 嵌套(向后兼容):
+//     - type: relabel
+//     config:
+//     drop_labels: [pod]
+//     会被解析为 Config={"drop_labels":["pod"]}
+//
+// 同时出现时,inline 字段优先(覆盖 config: 内同名字段)。
 type Stage struct {
 	Type   string                 `yaml:"type" json:"type"`
 	Config map[string]interface{} `yaml:"config,omitempty" json:"config,omitempty"`
+}
+
+// UnmarshalYAML 实现 yaml.Unmarshaler,支持 design §5.1 的 inline 字段写法,
+// 同时保留对旧版 config: 嵌套写法的向后兼容。
+//
+// 行为:
+//   - 先把 type 解析出来
+//   - 把整个 stage node 解析为 map[string]interface{}
+//   - 若存在 config 键且值为 map,先把其内容合并进 Config(向后兼容)
+//   - 再把除 type / config 之外的字段合并进 Config(inline,优先级高于 config:)
+func (s *Stage) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type plain struct {
+		Type string `yaml:"type"`
+	}
+	var p plain
+	if err := unmarshal(&p); err != nil {
+		return err
+	}
+	s.Type = p.Type
+
+	var raw map[string]interface{}
+	if err := unmarshal(&raw); err != nil {
+		return err
+	}
+	s.Config = make(map[string]interface{})
+
+	// 第一遍:向后兼容 — 若存在 config 键且为 map,先合并其内容
+	if cfgRaw, ok := raw["config"]; ok {
+		if m, ok := cfgRaw.(map[string]interface{}); ok {
+			for ck, cv := range m {
+				s.Config[ck] = cv
+			}
+		}
+	}
+	// 第二遍:inline 字段(覆盖 config: 内同名字段)
+	for k, v := range raw {
+		if k == "type" || k == "config" {
+			continue
+		}
+		s.Config[k] = v
+	}
+	return nil
 }
 
 // StageHandler 公共 Stage 接口(便于未来在 stages/ 子包中放更复杂实现)。
@@ -162,7 +220,27 @@ func (c *CompiledRuleSet) SortedStages() []CompiledStage {
 	return out
 }
 
+// stageOrder 定义 design §5.2 要求的 stage 顺序:
+//
+//	relabel → enrich → route → sample → downsample → deadvalue
+//
+// 不要求所有类型都出现,但出现的必须保持相对顺序。
+var stageOrder = map[string]int{
+	"relabel":    0,
+	"enrich":     1,
+	"route":      2,
+	"sample":     3,
+	"downsample": 4,
+	"deadvalue":  5,
+}
+
 // Validate 校验单个 RuleSet 的合法性(在 Compile 之前调用,提供更早的失败信息)。
+//
+// 校验项:
+//   - name / default_topic 必填
+//   - stage type 必须已知
+//   - 除 relabel 外,同类型 stage 不允许重复(relabel 常见多步清洗,允许重复)
+//   - stage 顺序必须符合 design §5.2:relabel → enrich → route → sample → downsample → deadvalue
 func (rs *RuleSet) Validate() error {
 	if rs.Name == "" {
 		return fmt.Errorf("ruleset: name is required")
@@ -170,18 +248,25 @@ func (rs *RuleSet) Validate() error {
 	if rs.DefaultTopic == "" {
 		return fmt.Errorf("ruleset %q: default_topic is required", rs.Name)
 	}
-	seen := make(map[string]struct{}, len(rs.Stages))
+	seen := make(map[string]int, len(rs.Stages)) // type → 出现次数
+	lastOrder := -1
 	for i, s := range rs.Stages {
-		if _, dup := seen[s.Type]; dup {
-			return fmt.Errorf("ruleset %q: stage[%d] duplicate type %q", rs.Name, i, s.Type)
-		}
-		seen[s.Type] = struct{}{}
-		switch s.Type {
-		case "relabel", "route", "sample", "enrich", "downsample", "deadvalue":
-			// known
-		default:
+		// 已知 type 检查
+		order, known := stageOrder[s.Type]
+		if !known {
 			return fmt.Errorf("ruleset %q: stage[%d] unsupported type %q", rs.Name, i, s.Type)
 		}
+		// 重复 type 检查(relabel 允许重复,其他类型不允许)
+		seen[s.Type]++
+		if s.Type != "relabel" && seen[s.Type] > 1 {
+			return fmt.Errorf("ruleset %q: stage[%d] duplicate type %q (only relabel may repeat)", rs.Name, i, s.Type)
+		}
+		// 顺序检查:当前 stage 的 order 必须 >= 上一个 stage 的 order
+		if order < lastOrder {
+			return fmt.Errorf("ruleset %q: stage[%d] type %q out of order (expected relabel→enrich→route→sample→downsample→deadvalue)",
+				rs.Name, i, s.Type)
+		}
+		lastOrder = order
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -116,6 +117,9 @@ type AdapterConfig struct {
 	RecoverCheck time.Duration
 	// RecoverSuccessThreshold 恢复期连续成功次数超过此值 → 切回 Kafka 并 drain。默认 3。
 	RecoverSuccessThreshold int
+	// DrainTimeout drain WAL 到 Kafka 的最大等待时间(spec §6.5)。
+	// 超时后 Close 不再阻塞,未 drain 的数据保留在 WAL 供下次启动重放。默认 30s。
+	DrainTimeout time.Duration
 	// Logger 必填。
 	Logger *zap.Logger
 }
@@ -139,6 +143,7 @@ type AdapterSink struct {
 
 	drainCh chan struct{}
 	done    chan struct{}
+	wg      sync.WaitGroup // 跟踪 monitor goroutine
 }
 
 // NewAdapterSink 构造 AdapterSink 并启动 monitor goroutine。
@@ -152,6 +157,9 @@ func NewAdapterSink(cfg AdapterConfig, k *kafkasink.Producer, w *WALSink) *Adapt
 	if cfg.RecoverSuccessThreshold <= 0 {
 		cfg.RecoverSuccessThreshold = 3
 	}
+	if cfg.DrainTimeout <= 0 {
+		cfg.DrainTimeout = 30 * time.Second
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = zap.NewNop()
 	}
@@ -162,7 +170,11 @@ func NewAdapterSink(cfg AdapterConfig, k *kafkasink.Producer, w *WALSink) *Adapt
 		drainCh: make(chan struct{}, 1),
 		done:    make(chan struct{}),
 	}
-	safego.GoWithRecover("sink-adapter-monitor", a.monitorLoop, func(v any, stack []byte) {
+	a.wg.Add(1)
+	safego.GoWithRecover("sink-adapter-monitor", func() {
+		defer a.wg.Done()
+		a.monitorLoop()
+	}, func(v any, stack []byte) {
 		cfg.Logger.Error("sink adapter monitor panic",
 			zap.Any("panic", v),
 			zap.ByteString("stack", stack),
@@ -176,25 +188,26 @@ func (a *AdapterSink) State() int32 { return a.state.Load() }
 
 // Send 按当前状态路由到 Kafka 或 WAL。
 //
-// kafka.Send 返回 ErrProduceBackpressure(503 语义)时**不**触发降级,
-// 因为那是上游瞬时压力,不是 kafka 故障。
+// 当 Kafka 不可用(broker 故障 → 内部 channel 堆满 → ErrProduceBackpressure,
+// 或其他 kafka 错误)时,降级到 WAL 落盘。WAL 也满时才返回 ErrBackpressure(503)。
+// 设计 §6.1: "同城 Kafka 暂时不可用 → 200 (内部) 内存 + WAL 重试; 长期不可用 → 503 当 WAL 满"。
 func (a *AdapterSink) Send(ctx context.Context, msg Message) error {
 	if a.state.Load() == StateNormal {
 		err := a.sendToKafka(ctx, msg)
 		if err == nil {
 			return nil
 		}
-		if errors.Is(err, kafkasink.ErrProduceBackpressure) {
-			ingestCity, sourceDC := obs.MetaLabels()
-			obs.BackpressureRejected.WithLabelValues("kafka", ingestCity, sourceDC).Inc()
-			return ErrBackpressure
-		}
-		// 真故障:kafka 内部错误(已关闭 / 不可达)
+		// ErrClosed 是不可恢复的,直接返回(不落 WAL)
 		if errors.Is(err, kafkasink.ErrClosed) {
 			return ErrClosed
 		}
+		// kafka 故障(含 ErrProduceBackpressure: broker 不可达 → channel 堆满)
+		// → 累计失败 + 降级到 WAL。WAL 满时 sendToWAL 返回 ErrBackpressure(503)。
+		if errors.Is(err, kafkasink.ErrProduceBackpressure) {
+			ingestCity, sourceDC := obs.MetaLabels()
+			obs.BackpressureRejected.WithLabelValues("kafka", ingestCity, sourceDC).Inc()
+		}
 		a.recordFailure()
-		// 单条失败时直接落 WAL(降级更及时)
 		return a.sendToWAL(ctx, msg)
 	}
 	// 降级模式:全部走 WAL
@@ -210,6 +223,25 @@ func (a *AdapterSink) Send(ctx context.Context, msg Message) error {
 //   - ctx.Err(): 上下文取消
 func (a *AdapterSink) sendToKafka(ctx context.Context, msg Message) error {
 	return a.kafka.Produce(ctx, msg.Topic, string(msg.Key), msg.Payload, msg.Headers)
+}
+
+// sendToKafkaSync 同步投递到 kafka,等待 broker ack 后返回。
+// 用于 drainWAL 场景,保证 at-least-once 语义(设计 §6.3):
+// 只有 broker 确认接收后才返回 nil,否则返回错误让段保留供下次重试。
+func (a *AdapterSink) sendToKafkaSync(ctx context.Context, msg Message) error {
+	ackCh := make(chan error, 1)
+	err := a.kafka.ProduceWithCallback(ctx, msg.Topic, string(msg.Key), msg.Payload, msg.Headers, func(ackErr error) {
+		ackCh <- ackErr
+	})
+	if err != nil {
+		return err
+	}
+	select {
+	case ackErr := <-ackCh:
+		return ackErr
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // sendToWAL 投递到 WAL,容量满时返回 ErrBackpressure(503)。
@@ -259,15 +291,24 @@ func (a *AdapterSink) recordSuccess() {
 	}
 }
 
-// Close 关闭 monitor + 底层 kafka/wal。
+// Close 关闭 monitor + 底层 wal/kafka。
+//
+// 关闭顺序(设计 §6.5): Stop monitor → drain WAL → Close WAL → Close Kafka。
+// 先关闭 monitor(done + wg.Wait),再 drain WAL(把未 .done 的段重放到 Kafka,
+// 超时 DrainTimeout),然后关 WAL(确保所有 pending 数据落盘),最后关 Kafka producer。
+//
+// spec §6.5: Sink Stop() must drain all messages before canceling context to avoid data loss。
 func (a *AdapterSink) Close() error {
 	close(a.done)
+	a.wg.Wait() // 等 monitor goroutine 退出
+	// drain WAL → Kafka(spec §6.5: 停机前把 WAL 数据回灌 Kafka)
+	a.drainWAL()
 	var errs []error
-	if err := a.kafka.Close(); err != nil {
-		errs = append(errs, fmt.Errorf("kafka close: %w", err))
-	}
 	if err := a.walSink.Close(); err != nil {
 		errs = append(errs, fmt.Errorf("wal close: %w", err))
+	}
+	if err := a.kafka.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("kafka close: %w", err))
 	}
 	if len(errs) == 0 {
 		return nil
@@ -316,19 +357,25 @@ func (a *AdapterSink) probeKafka() {
 
 // drainWAL 把 WAL 里所有未 .done 的段重放回 kafka。
 //
-// 重放过程中 kafka 再故障 → 停止 drain(剩余段保留 .done 标记前的状态)。
-// 重放成功 → 段被 mark .done,后续 cleanup 自动回收。
+// 使用同步投递(sendToKafkaSync)等待 broker ack,保证 at-least-once 语义(设计 §6.3):
+// 只有 broker 确认接收后才返回 nil → 段被 mark .done;
+// broker ack 失败 → 返回错误 → 段保留(下次 drain 再试)。
+//
+// spec §6.5: drain 有 DrainTimeout 硬上限(默认 30s),超时后未 drain 的数据
+// 保留在 WAL 供下次启动重放,避免 Close 永久阻塞。
 func (a *AdapterSink) drainWAL() {
-	a.cfg.Logger.Info("sink adapter: draining WAL to Kafka")
-	err := a.walSink.WAL().Replay(context.Background(), func(rec wal.Record) error {
+	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.DrainTimeout)
+	defer cancel()
+	a.cfg.Logger.Info("sink adapter: draining WAL to Kafka", zap.Duration("timeout", a.cfg.DrainTimeout))
+	err := a.walSink.WAL().Replay(ctx, func(rec wal.Record) error {
 		msg := Message{
 			Topic:   rec.Topic,
 			Key:     rec.Key,
 			Payload: rec.Payload,
 			Headers: rec.Headers,
 		}
-		// drain 期 kafka 不可用 → 停止 drain,保留段(下次再试)
-		if err := a.sendToKafka(context.Background(), msg); err != nil {
+		// 同步等待 broker ack;失败则停止 drain,保留段(下次再试)
+		if err := a.sendToKafkaSync(ctx, msg); err != nil {
 			a.cfg.Logger.Warn("drain send failed, will retry later",
 				zap.String("topic", rec.Topic),
 				zap.Error(err),

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,12 @@ import (
 	"github.com/lynnyq/bigdata/internal/obs"
 	"github.com/lynnyq/bigdata/internal/ruleengine"
 	"github.com/lynnyq/bigdata/pkg/httpx"
+	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/bigdata/pkg/tracex"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -178,8 +185,17 @@ func (s *Server) recoverMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				// spec §6.6: panic 通过 safego 统一计数 gateway_panic_recovered_total
+				safego.ReportPanic("admin-handler", rec, debugStack())
 				obs.ErrorsTotal.WithLabelValues("admin", "panic", s.cfg.IngestCity, s.cfg.SourceDC).Inc()
-				s.cfg.Logger.Error("admin: handler panic", zap.Any("recover", rec), zap.String("path", r.URL.Path))
+				s.cfg.Logger.Error("admin: handler panic",
+					zap.Any("recover", rec),
+					zap.String("path", r.URL.Path),
+					zap.String("trace_id", tracex.TraceIDFromContext(r.Context())),
+					zap.String("ingest_city", s.cfg.IngestCity),
+					zap.String("source_dc", s.cfg.SourceDC),
+					zap.String("stage", "admin"),
+				)
 				httpx.WriteErr(w, r, httpx.CodeInternal, MsgInternal)
 			}
 		}()
@@ -187,15 +203,37 @@ func (s *Server) recoverMW(next http.Handler) http.Handler {
 	})
 }
 
+// debugStack returns a byte slice of the current goroutine stack.
+func debugStack() []byte {
+	return runtimeStack()
+}
+
+// runtimeStack is a helper to avoid importing runtime/debug in multiple places.
+func runtimeStack() []byte {
+	return debug.Stack()
+}
+
 func (s *Server) tracingMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 简单注入 request id 即可(admin 不强制走 trace)
+		// spec §7.2: 每请求 TraceID; admin 响应体 trace_id 与入口请求一致
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := obs.Tracer.Start(ctx, "admin.request",
+			trace.WithAttributes(
+				attribute.String("ingest_city", s.cfg.IngestCity),
+				attribute.String("source_dc", s.cfg.SourceDC),
+				attribute.String("stage", "admin"),
+				attribute.String("http.method", r.Method),
+				attribute.String("http.path", r.URL.Path),
+			),
+		)
+		defer span.End()
+
 		rid := r.Header.Get("X-Request-Id")
 		if rid == "" {
 			rid = fmt.Sprintf("admin-%d", time.Now().UnixNano())
 		}
 		w.Header().Set("X-Request-Id", rid)
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -211,6 +249,10 @@ func (s *Server) allowlistMW(next http.Handler, allowed []*net.IPNet) http.Handl
 			s.cfg.Logger.Warn("admin: source ip not allowed",
 				zap.String("ip", ip),
 				zap.String("path", r.URL.Path),
+				zap.String("trace_id", tracex.TraceIDFromContext(r.Context())),
+				zap.String("ingest_city", s.cfg.IngestCity),
+				zap.String("source_dc", s.cfg.SourceDC),
+				zap.String("stage", "admin"),
 			)
 			httpx.WriteErr(w, r, httpx.CodeForbidden, MsgAuthzForbidden)
 			return
@@ -377,7 +419,13 @@ func (s *Server) writeServiceErr(w http.ResponseWriter, r *http.Request, err err
 	if err == nil {
 		return
 	}
-	s.cfg.Logger.Warn("admin: service error", zap.Error(err))
+	s.cfg.Logger.Warn("admin: service error",
+		zap.Error(err),
+		zap.String("trace_id", tracex.TraceIDFromContext(r.Context())),
+		zap.String("ingest_city", s.cfg.IngestCity),
+		zap.String("source_dc", s.cfg.SourceDC),
+		zap.String("stage", "admin"),
+	)
 	var sentinel *httpx.Sentinel
 	if errors.As(err, &sentinel) {
 		httpx.WriteErr(w, r, sentinel.Code, sentinel.Message)

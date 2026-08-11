@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"regexp"
 	"sort"
 	"sync"
 
@@ -127,10 +128,10 @@ type routeRule struct {
 }
 
 func (RouteStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
-	rulesRaw, _ := cfg["rules"].([]interface{})
+	rules := buildRouteRules(cfg)
 	// 兜底:cfg.default_topic → 上层 ruleset.DefaultTopic(由 Compile 注入,见 compiler.go)
 	dflt, _ := cfg["default_topic"].(string)
-	if len(rulesRaw) == 0 {
+	if len(rules) == 0 {
 		// 没 rules:直接把 default_topic 赋给每个 sample
 		return func(_ context.Context, in, prev []parser.Sample) ([]parser.Sample, int, error) {
 			out := prev[:0]
@@ -142,24 +143,6 @@ func (RouteStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 			}
 			return out, 0, nil
 		}, nil
-	}
-	rules := make([]routeRule, 0, len(rulesRaw))
-	for i, raw := range rulesRaw {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("route: rules[%d] must be a map", i)
-		}
-		match, _ := m["match"].(map[string]interface{})
-		topic, _ := m["topic"].(string)
-		if topic == "" {
-			return nil, fmt.Errorf("route: rules[%d] topic is required", i)
-		}
-		matchMap := make(map[string]string, len(match))
-		for k, v := range match {
-			vs, _ := v.(string)
-			matchMap[k] = vs
-		}
-		rules = append(rules, routeRule{match: matchMap, topic: topic})
 	}
 
 	return func(ctx context.Context, in, prev []parser.Sample) ([]parser.Sample, int, error) {
@@ -188,6 +171,80 @@ func (RouteStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 	}, nil
 }
 
+// buildRouteRules 从 cfg 构造 routeRule 切片,同时支持两种写法:
+//
+//  1. design §5.1 单条 match/to_topic(inline):
+//
+//     match: { app: "payment" }
+//     to_topic: prom.routed.payment
+//     default_topic: prom.routed.default
+//
+//  2. 旧版 rules 数组(向后兼容):
+//
+//     rules:
+//     - match: { team: core }
+//     topic: prom.core
+//
+// to_topic(design)和 topic(旧版)都支持;to_topic 优先。
+func buildRouteRules(cfg map[string]interface{}) []routeRule {
+	// 优先:rules 数组(旧版,支持多条)
+	rulesRaw, _ := cfg["rules"].([]interface{})
+	if len(rulesRaw) > 0 {
+		out := make([]routeRule, 0, len(rulesRaw))
+		for _, raw := range rulesRaw {
+			m, ok := raw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			match, _ := m["match"].(map[string]interface{})
+			topic := readString(m, "to_topic", "topic")
+			if topic == "" {
+				continue
+			}
+			out = append(out, routeRule{
+				match: toStringMap(match),
+				topic: topic,
+			})
+		}
+		return out
+	}
+
+	// design §5.1:单条 match + to_topic
+	matchRaw, hasMatch := cfg["match"].(map[string]interface{})
+	if !hasMatch {
+		return nil
+	}
+	topic := readString(cfg, "to_topic", "topic")
+	if topic == "" {
+		return nil
+	}
+	return []routeRule{{
+		match: toStringMap(matchRaw),
+		topic: topic,
+	}}
+}
+
+// readString 按 keys 顺序读第一个非空字符串(用于 to_topic → topic 的 fallback)。
+func readString(m map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// toStringMap 把 map[string]interface{} 转为 map[string]string(忽略非字符串值)。
+func toStringMap(in map[string]interface{}) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
 func matchAll(labels []parser.Label, m map[string]string) bool {
 	if len(m) == 0 {
 		return false
@@ -210,6 +267,9 @@ func matchAll(labels []parser.Label, m map[string]string) bool {
 // --- sample stage ---
 
 // SampleStage 实现 plan T2.6: 按概率 0.0~1.0 随机丢弃 sample。
+//
+// scope.metric_regex(design §5.1)可选:若配置,仅对 metric 名匹配正则的 sample
+// 做采样;不匹配的 sample 原样透传。未配置 scope 时对所有 sample 生效(向后兼容)。
 type SampleStage struct{}
 
 func (SampleStage) Name() string { return "sample" }
@@ -219,14 +279,22 @@ func (SampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 	if rateVal < 0 || rateVal > 1 {
 		return nil, fmt.Errorf("sample: rate must be in [0, 1], got %v", rateVal)
 	}
-	if rateVal == 0 {
+	scopeRe, err := compileScopeRegex(cfg, "sample")
+	if err != nil {
+		return nil, err
+	}
+
+	// 无 scope 且 rate=1 → 透传(快路径)
+	if scopeRe == nil && rateVal == 1 {
+		return passthroughApply, nil
+	}
+	// 无 scope 且 rate=0 → 全丢(快路径)
+	if scopeRe == nil && rateVal == 0 {
 		return func(_ context.Context, _, prev []parser.Sample) ([]parser.Sample, int, error) {
 			return prev[:0], 0, nil
 		}, nil
 	}
-	if rateVal == 1 {
-		return passthroughApply, nil
-	}
+
 	// 可选 seed:若用户传 seed,初始化独立 rand.Rand(用 sync.Pool 复用)
 	var pool *sync.Pool
 	if _, hasSeed := cfg["seed"]; hasSeed {
@@ -246,6 +314,11 @@ func (SampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 		if pool != nil {
 			r := pool.Get().(*rand.Rand)
 			for _, s := range in {
+				// scope 不匹配 → 透传(不参与采样)
+				if scopeRe != nil && !scopeRe.MatchString(s.Metric) {
+					out = append(out, s)
+					continue
+				}
 				if r.Float64() > rateVal {
 					dropped++
 					continue
@@ -255,6 +328,10 @@ func (SampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 			pool.Put(r)
 		} else {
 			for _, s := range in {
+				if scopeRe != nil && !scopeRe.MatchString(s.Metric) {
+					out = append(out, s)
+					continue
+				}
 				if rand.Float64() > rateVal {
 					dropped++
 					continue
@@ -276,15 +353,17 @@ func (SampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 //   - 静态:    纯字符串,直接作为 label value
 //   - 模板:    "${labels.<name>}",在 sample 已有 labels 中查 <name> 的值替换
 //
-// 配置示例:
+// 配置示例(design §5.1 inline 写法):
 //
 //	{
-//	  "labels": {
+//	  "add_labels": {
 //	    "cluster":  "prod",                 // 静态
 //	    "env_from": "${labels.env}",        // 引用 sample.labels.env
 //	    "region":   "${labels.region}"      // 引用 sample.labels.region
 //	  }
 //	}
+//
+// 向后兼容:若 add_labels 缺失,回退读 labels(旧版字段名)。
 //
 // 行为:
 //   - 新 label key 与 sample 已有 key 重名时,直接覆盖(下游 stage 仍按字母序排)
@@ -295,7 +374,11 @@ type EnrichStage struct{}
 func (EnrichStage) Name() string { return "enrich" }
 
 func (EnrichStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
-	labelsRaw, _ := cfg["labels"].(map[string]interface{})
+	// design §5.1 用 add_labels;向后兼容回退 labels
+	labelsRaw, _ := cfg["add_labels"].(map[string]interface{})
+	if labelsRaw == nil {
+		labelsRaw, _ = cfg["labels"].(map[string]interface{})
+	}
 	if len(labelsRaw) == 0 {
 		return passthroughApply, nil
 	}
@@ -305,8 +388,15 @@ func (EnrichStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 		template string // 非空表示模板引用,值为 "labels.<name>"
 		statik   string // 非空表示静态值
 	}
-	rules := make([]rule, 0, len(labelsRaw))
-	for k, v := range labelsRaw {
+	// 按 key 排序确保编译确定性(map 遍历顺序不确定)
+	keys := make([]string, 0, len(labelsRaw))
+	for k := range labelsRaw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	rules := make([]rule, 0, len(keys))
+	for _, k := range keys {
+		v := labelsRaw[k]
 		s, ok := v.(string)
 		if !ok {
 			return nil, fmt.Errorf("enrich: labels.%s must be a string, got %T", k, v)
@@ -352,8 +442,8 @@ func (EnrichStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 	}, nil
 }
 
-// upsertLabel 在 labels 中设置或追加 label key=value,保持 label 数量稳定。
-// 新建 key 追加到末尾(下游 relabel 阶段会重新排序)。
+// upsertLabel 在 labels 中设置或追加 label key=value,保持 labels 有序。
+// spec §4.4: sorted_labels_hash 要求 labels 排序;enrich 新增 label 后必须重排。
 func upsertLabel(labels []parser.Label, key, value string) []parser.Label {
 	for i := range labels {
 		if labels[i].Name == key {
@@ -361,7 +451,12 @@ func upsertLabel(labels []parser.Label, key, value string) []parser.Label {
 			return labels
 		}
 	}
-	return append(labels, parser.Label{Name: key, Value: value})
+	labels = append(labels, parser.Label{Name: key, Value: value})
+	// 追加新 key 后重新排序,保证 SeriesKey() 产出稳定的 sorted_labels_hash
+	sort.Slice(labels, func(i, j int) bool {
+		return labels[i].Name < labels[j].Name
+	})
+	return labels
 }
 
 // --- registry ---
@@ -461,4 +556,28 @@ func uint64FromCfg(cfg map[string]interface{}, key string, def uint64) uint64 {
 		}
 	}
 	return def
+}
+
+// compileScopeRegex 从 cfg 中解析 scope.metric_regex(design §5.1)。
+//
+// 返回值:
+//   - (nil, nil):未配置 scope 或 metric_regex 为空 → stage 对所有 sample 生效
+//   - (re, nil):  编译成功 → stage 仅对 metric name 匹配 re 的 sample 生效
+//   - (nil, err): 正则编译失败 → Compile 整体失败
+//
+// 用于 sample / downsample / deadvalue 三个 stage,统一"按 metric 名过滤"语义。
+func compileScopeRegex(cfg map[string]interface{}, stageType string) (*regexp.Regexp, error) {
+	scopeRaw, ok := cfg["scope"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+	pattern, _ := scopeRaw["metric_regex"].(string)
+	if pattern == "" {
+		return nil, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("%s: invalid scope.metric_regex %q: %w", stageType, pattern, err)
+	}
+	return re, nil
 }

@@ -26,6 +26,15 @@ func recordPanic() {
 	panicsRecovered++
 }
 
+// ReportPanic 手动上报一次 panic(用于 http.Handler 等非 goroutine 场景)。
+//
+// 调用方应先 recover() 再调用本函数;本函数会递增 safego 内部计数器,
+// 使 gateway_panic_recovered_total 指标正确反映所有 panic(含 admin handler)。
+// spec §6.6: 每个 goroutine(包括 admin server handler)统一通过 safego 包裹。
+func ReportPanic(name string, value any, stack []byte) {
+	recordPanic()
+}
+
 // Go 启动一个带 panic 恢复的 goroutine。
 // 适用于 fire-and-forget 任务;fn 内部 panic 不会让进程崩溃。
 //

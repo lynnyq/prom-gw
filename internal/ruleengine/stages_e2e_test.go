@@ -23,6 +23,8 @@ import (
 
 // TestStagesE2E_AllSixStagesPipeline 用一条综合 YAML 同时跑 6 个 stage,
 // 验证端到端行为符合预期。
+//
+// 注意:stage 顺序必须符合 design §5.2:relabel → enrich → route → sample → downsample → deadvalue
 func TestStagesE2E_AllSixStagesPipeline(t *testing.T) {
 	yaml := `
 rulesets:
@@ -32,6 +34,11 @@ rulesets:
       - type: relabel
         config:
           drop_labels: [instance, pod]
+      - type: enrich
+        config:
+          labels:
+            cluster: prod
+            owner_from: ${labels.team}
       - type: route
         config:
           rules:
@@ -39,19 +46,14 @@ rulesets:
               topic:  prom.e2e.core
             - match: {team: infra}
               topic:  prom.e2e.infra
-      - type: enrich
-        config:
-          labels:
-            cluster: prod
-            owner_from: ${labels.team}
       - type: sample
         config: { rate: 1.0 }  # 全保留,只为验证阶段顺序
-      - type: deadvalue
-        config: { window: 10s }
       - type: downsample
         config:
           interval: 1m
           aggregations: [avg, max]
+      - type: deadvalue
+        config: { window: 10s }
     version: 1
 `
 	cfg, err := LoadBytes([]byte(yaml))
@@ -73,16 +75,16 @@ rulesets:
 	})
 	p.SetRules(rs)
 
-	// 构造样本:team 分布,故意制造"死值"(同 metric 同 labels 同 value)
+	// 构造样本:team 分布,每 team 2 条不同值 sample(使 avg != max,避免 deadvalue 误杀)
 	mk := func(metric, team string, ts int64, val float64) parser.Sample {
 		return parser.Sample{
-			Metric: metric,
-			Value:  val,
+			Metric:    metric,
+			Value:     val,
 			Timestamp: ts,
 			Labels: []parser.Label{
 				{Name: "team", Value: team},
-				{Name: "instance", Value: "host-1"},     // 应被 relabel 删
-				{Name: "pod", Value: "pod-x"},          // 应被 relabel 删
+				{Name: "instance", Value: "host-1"}, // 应被 relabel 删
+				{Name: "pod", Value: "pod-x"},       // 应被 relabel 删
 				{Name: "job", Value: "api"},
 			},
 		}
@@ -91,14 +93,15 @@ rulesets:
 	// 时间戳都在 60s 桶内(对齐边界)
 	baseTs := int64(1700000040000) // 28333334 * 60s
 	in := []parser.Sample{
-		mk("requests_total", "core", baseTs+1000, 100),   // core, 发往下游
-		mk("requests_total", "core", baseTs+2000, 100),   // core, 死值 → 丢
-		mk("requests_total", "infra", baseTs+3000, 200),  // infra, 发往下游
-		mk("requests_total", "infra", baseTs+4000, 200),  // infra, 死值 → 丢
-		mk("requests_total", "data", baseTs+5000, 300),   // data → 路由到 default
+		mk("requests_total", "core", baseTs+1000, 100),  // core
+		mk("requests_total", "core", baseTs+2000, 200),  // core (不同值 → avg=150, max=200)
+		mk("requests_total", "infra", baseTs+3000, 300), // infra
+		mk("requests_total", "infra", baseTs+4000, 400), // infra (不同值 → avg=350, max=400)
+		mk("requests_total", "data", baseTs+5000, 500),  // data → 路由到 default
+		mk("requests_total", "data", baseTs+5500, 600),  // data (不同值 → avg=550, max=600)
 	}
 
-	// 1st call:5 条 sample 在同一 1m 桶,不会触发 downsample emit
+	// 1st call:6 条 sample 在同一 1m 桶,不会触发 downsample emit
 	// downsample 是替换型 stage:吸收 input 到桶里,桶关闭时才 emit
 	// 所以 1st batch 期望 captured=0(全部被 downsample 吸收)
 	err = p.Process(context.Background(), in, []byte("raw"), sink.Message{Topic: "ignored"})
@@ -106,17 +109,18 @@ rulesets:
 	assert.Empty(t, captured, "1st batch:downsample 吸收所有 sample,无 dispatch")
 
 	// 2nd call:跨入下个 1m 桶 → 触发 downsample emit
-	// 旧桶(3 series × 2 agg = 6 条 emit)+ 3 条新 sample 经 deadvalue 发出
+	// 旧桶(3 series × 2 agg = 6 条 emit)经 deadvalue 后发出
+	// (avg != max,所以 deadvalue 不会误杀)
 	in2 := []parser.Sample{
-		mk("requests_total", "core", baseTs+65_000, 999),  // core, 值变 → 发出
-		mk("requests_total", "infra", baseTs+66_000, 999), // infra, 值变 → 发出
-		mk("requests_total", "data", baseTs+67_000, 999),  // data(新 series for downsample,值变)→ 发出
+		mk("requests_total", "core", baseTs+65_000, 999),  // core, 新桶
+		mk("requests_total", "infra", baseTs+66_000, 999), // infra, 新桶
+		mk("requests_total", "data", baseTs+67_000, 999),  // data, 新桶
 	}
 	captured = nil
 	err = p.Process(context.Background(), in2, []byte("raw"), sink.Message{Topic: "ignored"})
 	require.NoError(t, err)
-	// 3 条 in 都通过 deadvalue(值变了)→ 3 条 sample 发往下游
-	// 同时 downsample emit 旧桶:3 series × 2 agg = 6 条 emit
+	// downsample emit 旧桶:3 series × 2 agg = 6 条 emit(avg/max 值不同,deadvalue 全部放行)
+	// 新桶的 3 条 sample 被 downsample 吸收(不透传),deadvalue 看不到
 	assert.GreaterOrEqual(t, len(captured), 6, "downsample emit 至少 6 条(3 series × 2 agg)")
 
 	// 验证 topic 路由:发出的 sample 应分别属于 core/infra/default
@@ -164,7 +168,7 @@ rulesets:
 	for i := 0; i < 600; i++ {
 		batch = append(batch, parser.Sample{
 			Metric:    "node_cpu_usage",
-			Value:     42.0, // 凝固
+			Value:     42.0,                  // 凝固
 			Timestamp: baseTs + int64(i*100), // 100ms 一个
 			Labels:    []parser.Label{{Name: "instance", Value: "host-A"}},
 		})

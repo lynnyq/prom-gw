@@ -98,6 +98,8 @@ func run() error {
 		OTLPEndpoint:   obs.OTLPEndpointFromEnv(),
 		Insecure:       true,
 		SampleRatio:    1.0,
+		IngestCity:     *ingestCity,
+		SourceDC:       *sourceDC,
 		Logger:         logger.Named("tracing"),
 	}); err != nil {
 		// 降级到 noop 已由 InitTracing 内部完成,这里只 warn
@@ -174,6 +176,16 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init wal: %w", err)
 	}
+	// adminCloser 在 admin server 创建后被赋值(spec §6.5: admin 必须在 sink/WAL 之后关闭,
+	// 确保 sink drain 期间 admin 仍可查询状态)。
+	// defer 注册顺序: tracing → adminCloser → walInst → sink → ...
+	// LIFO 执行顺序: ... → sink.Close → walInst.Close → adminCloser → tracing
+	var adminCloser func()
+	defer func() {
+		if adminCloser != nil {
+			adminCloser()
+		}
+	}()
 	defer func() { _ = walInst.Close() }()
 	logger.Info("wal initialized",
 		zap.String("dir", *walDir),
@@ -354,11 +366,12 @@ func run() error {
 			logger.Error("admin server failed", zap.Error(err))
 		}
 	})
-	defer func() {
+	// spec §6.5: admin 在 sink/WAL 之后关闭(通过 adminCloser defer 顺序保证)
+	adminCloser = func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = adminSrv.Shutdown(shutdownCtx)
-	}()
+	}
 
 	// 9. WAL 监控 goroutine:周期性写 wal_bytes / wal_oldest_age 指标
 	safego.Go("wal-metrics", func() {
@@ -407,7 +420,7 @@ func run() error {
 				"tenant":         meta.Tenant,
 				"source_dc":      meta.SourceDC,
 				"ingest_city":    meta.IngestCity,
-				"ingest_dc":      meta.SourceDC, // spec 4.3: ingest_dc 标识由哪城 prom-gw 写入
+				"ingest_dc":      *sourceDC, // spec 4.3: ingest_dc 标识本条数据由哪城 prom-gw 写入(本机 flag 值,非 meta.SourceDC)
 				"ingest_time_ms": fmt.Sprintf("%d", meta.IngestTs/1e6), // spec 4.3: ms 单位
 			}
 			// T1.12: 注入 traceparent(W3C trace context),由 OTel Propagator 序列化当前 span
@@ -436,7 +449,8 @@ func run() error {
 		}
 	})
 	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// spec §6.5: receiver 停机超时 30s,确保 in-flight 请求处理完
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutdownCancel()
 		_ = recv.Shutdown(shutdownCtx)
 	}()

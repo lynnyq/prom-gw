@@ -88,10 +88,10 @@ func TestAuth_GoodToken_PassesThrough(t *testing.T) {
 	s := newTestServer(t, nil)
 	w := doRequest(t, s, "good", "application/x-protobuf", "snappy",
 		encodeWriteRequest(&prompb.WriteRequest{}))
-	if w.Code != http.StatusNoContent {
+	if w.Code != http.StatusOK {
 		t.Logf("body=%s", w.Body.String())
 	}
-	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestContentType_Rejected(t *testing.T) {
@@ -138,7 +138,7 @@ func TestHandler_Invoked(t *testing.T) {
 	}
 	w := doRequest(t, s, "good", "application/x-protobuf", "snappy",
 		encodeWriteRequest(req))
-	assert.Equal(t, http.StatusNoContent, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, int32(2), got.Load())
 }
 

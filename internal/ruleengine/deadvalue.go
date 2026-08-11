@@ -190,6 +190,9 @@ func (s *deadvalueState) check(in parser.Sample) bool {
 // --- stage ---
 
 // DeadValueStage 实现 plan T3.3: 死值丢弃。
+//
+// scope.metric_regex(design §5.1)可选:若配置,仅对 metric 名匹配正则的 sample
+// 做死值检测;不匹配的 sample 原样透传。未配置 scope 时对所有 sample 生效(向后兼容)。
 type DeadValueStage struct{}
 
 func (DeadValueStage) Name() string { return "deadvalue" }
@@ -216,6 +219,12 @@ func (DeadValueStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error
 		maxSeries = 1_000_000 // 1M,符合 spec
 	}
 
+	// scope.metric_regex:仅对匹配的 metric 做死值检测,不匹配的透传
+	scopeRe, err := compileScopeRegex(cfg, "deadvalue")
+	if err != nil {
+		return nil, err
+	}
+
 	// 状态对象(atomic 装载支持热更新)
 	state := atomic.Pointer[deadvalueState]{}
 	state.Store(newDeadvalueState(window, maxSeries))
@@ -232,6 +241,11 @@ func (DeadValueStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error
 		dropped := 0
 		st := state.Load()
 		for _, s := range in {
+			// scope 不匹配 → 透传(不参与死值检测)
+			if scopeRe != nil && !scopeRe.MatchString(s.Metric) {
+				out = append(out, s)
+				continue
+			}
 			if st.check(s) {
 				out = append(out, s)
 			} else {

@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
@@ -44,6 +45,10 @@ type TracingConfig struct {
 	Insecure bool
 	// SampleRatio 采样率 0.0-1.0。默认 1.0(全采样);高吞吐可降到 0.1。
 	SampleRatio float64
+	// IngestCity 城市标识(bj/sz/hf),写入 resource attributes(spec §7.2: 所有 span 必带)。
+	IngestCity string
+	// SourceDC 机房标识,写入 resource attributes(spec §7.2: 所有 span 必带)。
+	SourceDC string
 	// Logger 可选,初始化失败时打 warn。
 	Logger *zap.Logger
 }
@@ -98,12 +103,22 @@ func InitTracing(cfg TracingConfig) error {
 	}
 
 	// resource 描述本服务
+	// spec §7.2: 所有 span 必带 ingest_city / source_dc attribute
+	resAttrs := []attribute.KeyValue{
+		semconv.ServiceName(cfg.ServiceName),
+		semconv.ServiceVersion(cfg.ServiceVersion),
+	}
+	if cfg.IngestCity != "" {
+		resAttrs = append(resAttrs, attribute.String("ingest_city", cfg.IngestCity))
+	}
+	if cfg.SourceDC != "" {
+		resAttrs = append(resAttrs, attribute.String("source_dc", cfg.SourceDC))
+	}
 	res, err := resource.Merge(
 		resource.Default(),
 		resource.NewWithAttributes(
 			semconv.SchemaURL,
-			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion(cfg.ServiceVersion),
+			resAttrs...,
 		),
 	)
 	if err != nil {

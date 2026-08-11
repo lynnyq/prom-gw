@@ -5,7 +5,7 @@
 //   - 真正的错误通过 gateway_produce_errors_total{reason} 指标和可选 callback 反馈
 //   - 同步等待用 Flush(timeout),仅在停机 + WAL 落盘场景使用
 //   - Channel 满且超过 produce_block_timeout 默认 100ms → ErrProduceBackpressure
-//   - Headers map 透传(traceparent / tenant / source_dc / ingest_ts 等)
+//   - Headers map 透传(traceparent / tenant / source_dc / ingest_dc / ingest_time_ms 等)
 //   - 启动参数: linger=50ms, batch=1MB, acks=all, 压缩=zstd
 //   - 幂等写:v1 默认开启 enable.idempotence(franz-go 默认值,无需显式设置)
 package kafkasink
@@ -46,6 +46,11 @@ const (
 	DefaultLinger                 = 50 * time.Millisecond
 	DefaultFlushTimeout           = 30 * time.Second
 	DefaultRequestTimeoutOverhead = 10 * time.Second
+	// spec §6.3: delivery.timeout.ms=120000 (2 分钟硬上限),retries=10
+	DefaultRecordTimeout = 120 * time.Second
+	DefaultRecordRetries = 10
+	// spec §6.5: Close 等待 in-flight 完成的超时
+	DefaultCloseTimeout = 30 * time.Second
 )
 
 // Config producer 配置。
@@ -74,7 +79,16 @@ type Config struct {
 	// Compression 压缩算法,默认 zstd。可选:zstd, snappy, lz4, gzip, none。
 	Compression string
 	// Idempotent 是否开启幂等写。默认 true。
-	Idempotent bool
+	// 注:bool 零值为 false,用 IdempotentSet 哨兵区分"未设置"和"显式设 false"。
+	Idempotent   bool
+	IdempotentSet bool
+	// RecordTimeout 单条消息从入队到 broker ack 的最大总时间(含重试)。
+	// 对应 Kafka delivery.timeout.ms,默认 120s。超时后消息进入 error 回调。
+	RecordTimeout time.Duration
+	// RecordRetries 单条消息最大重试次数(对应 Kafka retries),默认 10。
+	RecordRetries int
+	// CloseTimeout Close 时等待 in-flight 消息完成的最大时间,默认 30s。
+	CloseTimeout time.Duration
 	// Logger 必填,用于连接 / 关闭 / 错误日志。
 	Logger *zap.Logger
 }
@@ -138,8 +152,23 @@ func New(cfg Config) (*Producer, error) {
 	if cfg.RequestTimeoutOverhead <= 0 {
 		cfg.RequestTimeoutOverhead = DefaultRequestTimeoutOverhead
 	}
+	if cfg.RecordTimeout <= 0 {
+		cfg.RecordTimeout = DefaultRecordTimeout
+	}
+	if cfg.RecordRetries <= 0 {
+		cfg.RecordRetries = DefaultRecordRetries
+	}
+	if cfg.CloseTimeout <= 0 {
+		cfg.CloseTimeout = DefaultCloseTimeout
+	}
 	if cfg.ClientID == "" {
 		cfg.ClientID = "prom-gw"
+	}
+	// spec §6.3: enable.idempotence=true(默认开启)
+	// 由于 bool 零值为 false,用一个哨兵字段 IdempotentSet 标记是否显式设置;
+	// 未设置时默认 true,显式设 false 时尊重调用方
+	if !cfg.IdempotentSet {
+		cfg.Idempotent = true
 	}
 	compression, err := parseCompressionCodec(cfg.Compression)
 	if err != nil {
@@ -156,6 +185,9 @@ func New(cfg Config) (*Producer, error) {
 		kgo.RequestTimeoutOverhead(cfg.RequestTimeoutOverhead),
 		kgo.ProducerBatchCompression(compression),
 		kgo.AllowAutoTopicCreation(),
+		// spec §6.3: delivery.timeout.ms=120000,retries=10
+		kgo.RecordDeliveryTimeout(cfg.RecordTimeout),
+		kgo.RecordRetries(cfg.RecordRetries),
 	}
 	if !cfg.Idempotent {
 		opts = append(opts, kgo.DisableIdempotentWrite())
@@ -291,14 +323,29 @@ func (p *Producer) Flush(timeout time.Duration) error {
 // Close 排空 in-flight 消息并关闭 client。幂等。
 //
 // 阻塞直到:
-//   - 所有 in-flight 消息获得 ack(或最终失败)
+//   - 所有 in-flight 消息获得 ack(或最终失败),最长等待 CloseTimeout(默认 30s)
 //   - franz-go client 内部资源释放
+//
+// spec §6.5: 等待 in-flight 请求处理完(超时 30s)
 func (p *Producer) Close() error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil // 已关闭
 	}
 	close(p.ch)
-	<-p.done
+
+	// 等待 flusher 退出,最长 CloseTimeout
+	done := make(chan struct{})
+	go func() {
+		<-p.done
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(p.cfg.CloseTimeout):
+		p.cfg.Logger.Warn("kafkasink: close timeout, in-flight messages may be lost",
+			zap.Duration("timeout", p.cfg.CloseTimeout))
+	}
+
 	p.client.Close()
 	p.cfg.Logger.Info("kafkasink closed")
 	return nil

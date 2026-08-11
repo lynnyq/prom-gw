@@ -21,6 +21,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/lynnyq/bigdata/internal/obs"
 	"github.com/lynnyq/bigdata/internal/ruleengine"
+	"github.com/lynnyq/bigdata/pkg/safego"
 	"go.uber.org/zap"
 )
 
@@ -114,9 +115,7 @@ func (f *FileSource) Get(_ context.Context) Snapshot {
 // Watch 返回只读 channel,文件变更时推送新快照。
 func (f *FileSource) Watch(ctx context.Context) <-chan Snapshot {
 	out := make(chan Snapshot, 1)
-	safegoName := "filesource-watch"
-	_ = safegoName
-	go func() {
+	safego.GoWithRecover("filesource-watch", func() {
 		defer close(out)
 		for {
 			select {
@@ -145,7 +144,9 @@ func (f *FileSource) Watch(ctx context.Context) <-chan Snapshot {
 				obs.ErrorsTotal.WithLabelValues("config", "filesource_fsnotify", "", "").Inc()
 			}
 		}
-	}()
+	}, func(value any, stack []byte) {
+		f.logger.Error("filesource: watch panic", zap.Any("panic", value), zap.ByteString("stack", stack))
+	})
 	return out
 }
 
@@ -264,7 +265,7 @@ func (n *NacosSource) Get(ctx context.Context) Snapshot {
 func (n *NacosSource) Watch(ctx context.Context) <-chan Snapshot {
 	src := make(chan Snapshot, 1)
 	ch := n.client.ListenConfig(ctx, n.dataID, n.group)
-	go func() {
+	safego.GoWithRecover("nacossource-watch", func() {
 		defer close(src)
 		for {
 			select {
@@ -292,7 +293,9 @@ func (n *NacosSource) Watch(ctx context.Context) <-chan Snapshot {
 				src <- snap
 			}
 		}
-	}()
+	}, func(value any, stack []byte) {
+		n.logger.Error("nacos: watch panic", zap.Any("panic", value), zap.ByteString("stack", stack))
+	})
 	return src
 }
 
@@ -403,7 +406,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	for _, s := range m.sources {
 		s := s
 		ch := s.Watch(ctx)
-		go m.consume(s.Name(), ch)
+		safego.GoWithRecover("config-consume-"+s.Name(), func() {
+			m.consume(s.Name(), ch)
+		}, func(value any, stack []byte) {
+			m.logger.Error("config: consume panic", zap.String("source", s.Name()), zap.Any("panic", value), zap.ByteString("stack", stack))
+		})
 	}
 	return nil
 }

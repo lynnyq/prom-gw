@@ -62,9 +62,8 @@ func TestPipeline_SubmitAndDrain(t *testing.T) {
 }
 
 func TestPipeline_BackpressureWhenFull(t *testing.T) {
-	// sink 慢;通过让 sink 在 ctx 取消时返回,验证 Stop 能正确排空。
-	// 这里用 sync.Once 控制"未释放"状态;Stop 时 ctx 取消让 sink 退出。
-	// 验证:不会发生 goroutine 死锁,Stop 能正常返回。
+	// sink 慢;Stop() 现在先排空 channel 再取消 ctx(设计 §6.5)。
+	// 释放 sink 后 worker 能处理完剩余消息,Stop 正常返回。
 	fs := &blockingFakeSink{release: make(chan struct{})}
 	p := NewPipeline(PipelineConfig{BufferSize: 2}, fs)
 	p.Start()
@@ -73,7 +72,9 @@ func TestPipeline_BackpressureWhenFull(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		_ = p.Submit(context.Background(), Message{Topic: "t"})
 	}
-	// 此时 worker 已被阻塞,Stop 通过 ctx 取消让 sink 退出 → worker 退出 → wg.Done
+	// 释放 sink,让 worker 能排空剩余消息
+	close(fs.release)
+
 	stopDone := make(chan struct{})
 	go func() {
 		p.Stop()

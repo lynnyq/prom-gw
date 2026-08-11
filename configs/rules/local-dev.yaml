@@ -1,0 +1,46 @@
+# 本地开发测试用 ruleset(单节点 Kafka + 单实例 prom-gw)
+# ----------------------------------------------------------------------------
+# 用法:
+#   KAFKA_BROKERS=localhost:9092 ./bin/prom-gw \
+#     --config=configs/rules/local-dev.yaml \
+#     --tokens=configs/tokens/local.yaml \
+#     --wal-dir=/tmp/prom-gw-local-wal \
+#     --source-dc=dc-local-dev
+#
+# 前置:先创建 topic(参考 docs/operations/local-dev-guide.md §3.7)
+#   prom.local.raw.app_business / prom.local.raw.infra
+#   prom.local.routed.core / prom.local.routed.infra / prom.local.routed.data / prom.local.routed.app_business
+# ----------------------------------------------------------------------------
+rulesets:
+  - name: app-business
+    tenant: app-business
+    input_topic: prom.local.raw.app_business
+    default_topic: prom.local.routed.app_business
+    version: 1
+    match:
+      metric_prefix: ""        # 空 = 全量接收
+    stages:
+      - type: relabel
+        drop_labels:
+          - env
+          - instance
+          - pod
+        keep_labels: []
+        label_map:
+          kubernetes_io_cluster: cluster
+
+      - type: route
+        rules:
+          - match: { team: "core" }
+            topic: prom.local.routed.core
+          - match: { team: "infra" }
+            topic: prom.local.routed.infra
+          - match: { team: "data" }
+            topic: prom.local.routed.data
+
+      - type: sample
+        rate: 0.1             # 10% 采样(本地调试可调高到 1.0 保留全量)
+
+global:
+  rate_limit_per_instance: 100000
+  channel_buffer: 65535

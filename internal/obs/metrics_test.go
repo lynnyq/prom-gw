@@ -122,7 +122,7 @@ func TestRulesetSwitch_RecordedOnSwap(t *testing.T) {
 	RulesetSwitchTotal.WithLabelValues("rs_test", "v1", "v2", "test_city", "test_dc").Inc()
 
 	val := getCounterValue(t, "gateway_ruleset_switch_total",
-		"name", "rs_test", "from_version", "v1", "to_version", "v2",
+		"ruleset", "rs_test", "from_version", "v1", "to_version", "v2",
 		"ingest_city", "test_city", "source_dc", "test_dc")
 	assert.GreaterOrEqual(t, val, 2.0)
 }

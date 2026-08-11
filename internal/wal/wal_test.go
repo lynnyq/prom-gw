@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -486,6 +487,40 @@ func TestCleanup_RemovesOldDone(t *testing.T) {
 }
 
 // --- scanExisting ---
+
+func TestScanExisting_RecoversActiveSegment(t *testing.T) {
+	// 模拟进程崩溃:写 record 后不 Close(不 seal active 段),直接重开。
+	// 设计 §6.2: Reopen replay consistency — 重开后应能 replay 未封段的 active 数据。
+	dir := newTempDir(t)
+
+	// 第一轮:写 record 但不 Close(模拟崩溃)
+	w1, err := New(Config{Dir: dir, SegmentBytes: 1 << 20, DiskUsedRatio: 1.0})
+	require.NoError(t, err)
+	writeN(t, w1, 3)
+	// 不调 w1.Close(),直接放弃引用(active .log 文件留在磁盘上)
+
+	// 第二轮:重开,scanExisting 应把 .log 封段并加入 replay 队列
+	w2 := newTestWAL(t, Config{Dir: dir, SegmentBytes: 1 << 20, DiskUsedRatio: 1.0, CleanupInterval: time.Hour, Retention: time.Hour})
+
+	var seen []string
+	err = w2.Replay(context.Background(), func(rec Record) error {
+		seen = append(seen, string(rec.Payload))
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Len(t, seen, 3, "active segment should be recovered and replayed on reopen")
+
+	// 旧 active 段应已被封段并 replay 成功(replay 后 rename 为 .done)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	recoveredCount := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sealed") || strings.HasSuffix(e.Name(), ".done") {
+			recoveredCount++
+		}
+	}
+	assert.Greater(t, recoveredCount, 0, "old active segment should be sealed/done on disk after reopen")
+}
 
 func TestScanExisting_PicksUpSealedAndDone(t *testing.T) {
 	dir := newTempDir(t)

@@ -193,17 +193,18 @@ var (
 
 	// RulesetSwitchTotal 规则集热切换计数(plan T2.10 / T5.6)。
 	// from_version="v0" 表示首次加载。
+	// spec 7.1: 统一使用 ruleset 标签名,与 RulesetVersion/RulesetProcessedTotal 保持一致。
 	RulesetSwitchTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_ruleset_switch_total",
-		Help: "Total number of ruleset hot-swaps, labeled by name/from_version/to_version/ingest_city/source_dc.",
-	}, []string{"name", "from_version", "to_version", "ingest_city", "source_dc"})
+		Help: "Total number of ruleset hot-swaps, labeled by ruleset/from_version/to_version/ingest_city/source_dc.",
+	}, []string{"ruleset", "from_version", "to_version", "ingest_city", "source_dc"})
 
 	// RulesetVersion 当前生效 ruleset 版本(Gauge)。
-	// spec 7.1 要求带 ingest_city 标签便于跨城切片。
+	// spec 7.1: gateway_ruleset_version{ruleset, ingest_city}
 	RulesetVersion = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "gateway_ruleset_version",
-		Help: "Currently active ruleset version, by name/ingest_city.",
-	}, []string{"name", "ingest_city"})
+		Help: "Currently active ruleset version, by ruleset/ingest_city.",
+	}, []string{"ruleset", "ingest_city"})
 
 	// ConfigReloadTotal 配置热重载计数(plan T2.10 / T4.1)。
 	// source ∈ {file, nacos, api} ;status ∈ {ok, error}
@@ -213,18 +214,20 @@ var (
 	}, []string{"source", "status", "ingest_city", "source_dc"})
 
 	// RulesetRoutedTotal router 路由到各 ruleset 的 sample 数(plan T2.8 / design 5.2)。
-	// name 来自 router.Entry.Name;未命中 default 的样本不计入。
+	// ruleset 来自 router.Entry.Name;未命中 default 的样本不计入。
+	// spec 7.1: 统一使用 ruleset 标签名。
 	RulesetRoutedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_ruleset_routed_total",
 		Help: "Total number of samples routed to each ruleset by the fan-out router, with ingest_city/source_dc.",
-	}, []string{"name", "ingest_city", "source_dc"})
+	}, []string{"ruleset", "ingest_city", "source_dc"})
 
 	// RulesetErrorsTotal ruleset 内部处理错误计数(router 层聚合)。
-	// name 来自 router.Entry.Name;用于识别某 ruleset 是否频繁失败。
+	// ruleset 来自 router.Entry.Name;用于识别某 ruleset 是否频繁失败。
+	// spec 7.1: 统一使用 ruleset 标签名。
 	RulesetErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_ruleset_errors_total",
 		Help: "Total number of per-ruleset processing errors surfaced through the router, with ingest_city/source_dc.",
-	}, []string{"name", "ingest_city", "source_dc"})
+	}, []string{"ruleset", "ingest_city", "source_dc"})
 
 	// RulesetProcessedTotal 各 ruleset + stage 处理的 sample 数(plan T2.7 / spec 7.1)。
 	// spec 7.1: gateway_ruleset_processed_total{ruleset, stage, ingest_city}

@@ -268,6 +268,9 @@ func (s *downsampleState) ingest(in parser.Sample) []parser.Sample {
 // --- stage ---
 
 // DownsampleStage 实现 plan T3.2: 按 interval 桶聚合。
+//
+// scope.metric_regex(design §5.1)可选:若配置,仅对 metric 名匹配正则的 sample
+// 做聚合;不匹配的 sample 原样透传。未配置 scope 时对所有 sample 生效(向后兼容)。
 type DownsampleStage struct{}
 
 func (DownsampleStage) Name() string { return "downsample" }
@@ -317,6 +320,12 @@ func (DownsampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, erro
 		pCap = 4096
 	}
 
+	// scope.metric_regex:仅对匹配的 metric 做聚合,不匹配的透传
+	scopeRe, err := compileScopeRegex(cfg, "downsample")
+	if err != nil {
+		return nil, err
+	}
+
 	// 状态对象(atomic 装载支持热更新)
 	state := atomic.Pointer[downsampleState]{}
 	state.Store(newDownsampleState(interval, aggs, maxSeries, pCap))
@@ -329,24 +338,32 @@ func (DownsampleStage) Compile(cfg map[string]interface{}) (StageApplyFunc, erro
 			attribute.Int("aggregations", len(aggs)),
 		)
 
-		// 累计要 emit 的 sample(可能在原 slice 之上)
+		// emit 收集桶关闭产生的聚合 sample;passthrough 收集不匹配 scope 的原样 sample
 		emit := make([]parser.Sample, 0, len(in))
+		var passthrough []parser.Sample
 		st := state.Load()
 		for _, s := range in {
+			if scopeRe != nil && !scopeRe.MatchString(s.Metric) {
+				passthrough = append(passthrough, s)
+				continue
+			}
 			emitted := st.ingest(s)
 			if len(emitted) > 0 {
 				emit = append(emit, emitted...)
 			}
 		}
-		// downsample stage 不透传原 sample(被聚合掉了),只 emit 关闭的桶
+		// downsample stage 不透传被聚合的原 sample(被吸收进桶),只 emit 关闭的桶;
+		// 但不匹配 scope 的 sample 原样追加到输出
+		out := append(emit, passthrough...)
 		span.SetAttributes(
 			attribute.Int("input", len(in)),
 			attribute.Int("emitted", len(emit)),
+			attribute.Int("passthrough", len(passthrough)),
 		)
 		ingestCity, _ := obs.MetaLabels()
 		obs.StageDuration.WithLabelValues("rule_downsample", "ok", ingestCity).Observe(0)
 		// state 级 metric(spec 7.1 gateway_state_series)
 		obs.StateSeries.WithLabelValues("downsample", ingestCity).Set(float64(st.seriesCount()))
-		return emit, 0, nil
+		return out, 0, nil
 	}, nil
 }

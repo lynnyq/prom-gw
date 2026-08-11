@@ -34,8 +34,8 @@ func TestLoadFile_AppBusinessYAML(t *testing.T) {
 	rs := cfg.Rulesets[0]
 	assert.Equal(t, "app-business", rs.Name)
 	assert.Equal(t, "app-business", rs.Tenant)
-	assert.Equal(t, "prom.raw.app_business", rs.SourceTopic)
-	assert.Equal(t, "prom.app_business.default", rs.DefaultTopic)
+	assert.Equal(t, "prom.bj.raw.app_business", rs.SourceTopic)
+	assert.Equal(t, "prom.bj.routed.app_business", rs.DefaultTopic)
 	assert.Equal(t, int64(1), rs.Version)
 	// 3 个 stage:relabel / route / sample
 	assert.Equal(t, []string{"relabel", "route", "sample"}, stageTypes(rs.Stages))
@@ -80,9 +80,9 @@ rulesets:
   - name: bad
     default_topic: t
     stages:
-      - type: relabel
+      - type: route
         config: {}
-      - type: relabel
+      - type: route
         config: {}
     version: 1
 `,
@@ -188,7 +188,7 @@ func TestPipeline_AppBusinessE2E(t *testing.T) {
 	t.Logf("captured topics distribution: %v", topics)
 
 	// 至少有一个 known 路由被命中
-	known := []string{"prom.app_business.core", "prom.app_business.infra", "prom.app_business.data", "prom.app_business.default"}
+	known := []string{"prom.bj.routed.core", "prom.bj.routed.infra", "prom.bj.routed.data", "prom.bj.routed.app_business"}
 	hits := 0
 	for _, k := range known {
 		if topics[k] > 0 {
@@ -243,7 +243,7 @@ func TestPipeline_RecompileAndSwap(t *testing.T) {
 		Name:         "v2",
 		DefaultTopic: "t2",
 		Stages:       []Stage{{Type: "sample", Config: map[string]interface{}{"rate": 0.0}}}, // 全丢
-		Version:     2,
+		Version:      2,
 	})
 	require.NoError(t, err)
 	p.SetRules(rs2)

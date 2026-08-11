@@ -106,7 +106,11 @@ func (p *Pipeline) Submit(ctx context.Context, msg Message) error {
 	}
 }
 
-// Stop 关闭 channel,取消 worker ctx,等待 worker 排空已有消息后返回。
+// Stop 关闭 channel,等待 worker 排空已有消息后,再取消 ctx。
+//
+// 设计 §6.5: "Flush 所有 batch buffer; 等待 in-flight 请求处理完(超时 30s)"。
+// 先 close(ch) 通知 worker 不再有新消息,worker 用仍有效的 ctx 处理完剩余消息,
+// 最后 cancel() 释放 ctx 资源。这样保证 shutdown 期间数据不丢。
 func (p *Pipeline) Stop() {
 	select {
 	case <-p.stopCh:
@@ -115,9 +119,10 @@ func (p *Pipeline) Stop() {
 		close(p.stopCh)
 	}
 	close(p.ch)
-	// 取消 worker ctx,让阻塞中的 sink.Send 立即返回
-	p.cancel()
+	// 等 worker 排空 channel 中的剩余消息(ctx 仍有效,sink.Send 能正常完成)
 	p.wg.Wait()
+	// 排空后再取消 ctx,释放资源
+	p.cancel()
 }
 
 // Stats 监控用。

@@ -230,6 +230,10 @@ func New(cfg Config) (*fileWAL, error) {
 // --- 启动辅助 ---
 
 // scanExisting 扫描目录,把已有段加入索引。
+//
+// 对于未封段的 .log 文件(active 段,可能是上次进程崩溃遗留),
+// 读取所有有效 record、写 footer、rename 为 .sealed,使其可被 Replay。
+// 设计 §6.2: "Reopen replay consistency"。
 func (w *fileWAL) scanExisting() error {
 	entries, err := os.ReadDir(w.cfg.Dir)
 	if err != nil {
@@ -243,6 +247,16 @@ func (w *fileWAL) scanExisting() error {
 		baseName, sealed, done := parseSegmentName(name)
 		if baseName == "" {
 			continue
+		}
+		// active(.log)段在重开时需要封段,使其可被 Replay。
+		if !sealed && !done {
+			path := filepath.Join(w.cfg.Dir, name)
+			if err := w.sealRecoveredSegment(path, baseName); err != nil {
+				// 封段失败(空文件 / 损坏)→ 删除并跳过
+				_ = os.Remove(path)
+				continue
+			}
+			continue // sealRecoveredSegment 已更新 segments 和 bytes
 		}
 		info, err := e.Info()
 		if err != nil {
@@ -258,6 +272,92 @@ func (w *fileWAL) scanExisting() error {
 		}
 		w.bytes.Add(info.Size())
 	}
+	return nil
+}
+
+// sealRecoveredSegment 把一个未封段的 .log 文件封段:
+// 读取所有有效 record(遇到截断/损坏则停止)、计算 CRC、写 footer、rename 为 .sealed。
+// 成功后把段加入 segments 索引并更新 bytes。
+func (w *fileWAL) sealRecoveredSegment(path, baseName string) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+
+	hasher := crc32.NewIEEE()
+	recordCount := 0
+	var lastValidOffset int64 = 0
+
+	for {
+		header := make([]byte, 4)
+		_, err := io.ReadFull(f, header)
+		if err != nil {
+			break // EOF 或截断
+		}
+		totalLen := binary.BigEndian.Uint32(header)
+		if totalLen < uint32(recordFixedBody) || totalLen > 64*1024*1024 {
+			break // 无效 record 头
+		}
+		body := make([]byte, totalLen)
+		_, err = io.ReadFull(f, body)
+		if err != nil {
+			break // record 被截断
+		}
+		_, _ = hasher.Write(header)
+		_, _ = hasher.Write(body)
+		recordCount++
+		lastValidOffset += int64(4 + totalLen)
+	}
+
+	// 空段(无有效 record)→ 无需封段,直接返回错误让调用方删除
+	if recordCount == 0 {
+		_ = f.Close()
+		return fmt.Errorf("wal: no valid records in %s", baseName)
+	}
+
+	// 截断可能的部分写入(最后一条不完整的 record 之后的数据)
+	if err := f.Truncate(lastValidOffset); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		_ = f.Close()
+		return err
+	}
+
+	// 写 footer
+	crc := hasher.Sum32()
+	footer := make([]byte, segmentFooterSize)
+	copy(footer[0:4], segmentMagic[:])
+	binary.BigEndian.PutUint32(footer[4:8], uint32(recordCount))
+	binary.BigEndian.PutUint64(footer[8:16], uint64(crc))
+	if _, err := f.Write(footer); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+
+	sealedPath := path + ".sealed"
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(path, sealedPath); err != nil {
+		return err
+	}
+
+	info, _ := os.Stat(sealedPath)
+	w.segments[baseName] = &SegmentInfo{
+		Path:        sealedPath,
+		BaseName:    baseName,
+		Size:        info.Size(),
+		RecordCount: recordCount,
+		CreatedAt:   info.ModTime(),
+		Sealed:      true,
+	}
+	w.bytes.Add(info.Size())
 	return nil
 }
 

@@ -20,6 +20,7 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/v2/clients"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
+	"github.com/lynnyq/bigdata/pkg/safego"
 	"go.uber.org/zap"
 )
 
@@ -184,7 +185,7 @@ func (a *NacosClientAdapter) ListenConfig(ctx context.Context, dataID, group str
 
 	// 1) warm-up
 	a.recordListener()
-	go func() {
+	safego.GoWithRecover("nacos-warmup", func() {
 		defer a.doneListener()
 		content, err := a.inner.GetConfig(vo.ConfigParam{DataId: dataID, Group: group})
 		ev := NacosChange{DataID: dataID, Group: group, Content: content, Err: err}
@@ -196,7 +197,11 @@ func (a *NacosClientAdapter) ListenConfig(ctx context.Context, dataID, group str
 		case out <- ev:
 		case <-listenCtx.Done():
 		}
-	}()
+	}, func(value any, stack []byte) {
+		if a.logger != nil {
+			a.logger.Error("nacos: warmup panic", zap.Any("panic", value), zap.ByteString("stack", stack))
+		}
+	})
 
 	// 2) 注册 SDK 长轮询
 	if err := a.inner.ListenConfig(vo.ConfigParam{
@@ -215,12 +220,16 @@ func (a *NacosClientAdapter) ListenConfig(ctx context.Context, dataID, group str
 				zap.String("dataId", dataID), zap.Error(err))
 		}
 		// 立刻 push 一个 error 事件,让上层知道监听失败
-		go func() {
+		safego.GoWithRecover("nacos-error-push", func() {
 			select {
 			case out <- NacosChange{DataID: dataID, Group: group, Err: err}:
 			case <-listenCtx.Done():
 			}
-		}()
+		}, func(value any, stack []byte) {
+			if a.logger != nil {
+				a.logger.Error("nacos: error-push panic", zap.Any("panic", value), zap.ByteString("stack", stack))
+			}
+		})
 	}
 
 	// 3) ctx 取消时取消监听 + 从 cancels 表删除
@@ -229,14 +238,18 @@ func (a *NacosClientAdapter) ListenConfig(ctx context.Context, dataID, group str
 	// 持有 out 引用时发生 send-on-closed  panic;调用方用 ctx 取消表达"我不再读了",
 	// 写侧 goroutine 在 select 命中 <-listenCtx.Done() 时自然退出,out 引用归零后被 GC。
 	a.recordListener()
-	go func() {
+	safego.GoWithRecover("nacos-cleanup", func() {
 		defer a.doneListener()
 		<-listenCtx.Done()
 		_ = a.inner.CancelListenConfig(vo.ConfigParam{DataId: dataID, Group: group})
 		a.mu.Lock()
 		delete(a.cancels, key)
 		a.mu.Unlock()
-	}()
+	}, func(value any, stack []byte) {
+		if a.logger != nil {
+			a.logger.Error("nacos: cleanup panic", zap.Any("panic", value), zap.ByteString("stack", stack))
+		}
+	})
 	return out
 }
 

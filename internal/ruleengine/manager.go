@@ -20,6 +20,7 @@ package ruleengine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/lynnyq/bigdata/internal/obs"
@@ -143,8 +144,11 @@ func (m *Manager) rebuildRouterLocked() error {
 			Process: process,
 		})
 	}
-	// 稳定排序:把 entries 按 name 排,但 router.Validate 要求 default 在最后
-	// 这里我们手动分离:有 Match 放前面,无 Match 放最后
+	// 稳定排序:把 entries 按 name 排,确保 router entry 顺序确定(spec 5.2)
+	// router.Validate 要求 default 在最后,这里手动分离:有 Match 放前面,无 Match 放最后
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name < entries[j].Name
+	})
 	nonDefault := make([]router.Entry, 0, len(entries))
 	var defaultEntry *router.Entry
 	for i := range entries {

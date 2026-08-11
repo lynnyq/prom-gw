@@ -195,7 +195,7 @@ func TestE2E_Tracing_UpstreamTraceparent_PropagatesAllStages(t *testing.T) {
 	// 2. 发请求(把第一个值取出来传给 doRequest)
 	w := doRequestWithHeaders(t, setup.server, "good", map[string]string{"traceparent": clientTP},
 		encodeWriteRequest(writeRequest()))
-	require.Equal(t, http.StatusNoContent, w.Code, "端到端必须 204")
+	require.Equal(t, http.StatusOK, w.Code, "端到端必须 200")
 
 	// 3. 等待 worker 把消息投递到 sink
 	msgs := waitForMessages(t, setup.sink, 1, 2*time.Second)
@@ -256,7 +256,7 @@ func TestE2E_Tracing_NoUpstreamTraceparent_StartsRoot(t *testing.T) {
 	// 1. 不传 traceparent,服务端应自开 root span
 	w := doRequestWithHeaders(t, setup.server, "good", nil,
 		encodeWriteRequest(writeRequest()))
-	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
 
 	// 2. 等待消息落地
 	msgs := waitForMessages(t, setup.sink, 1, 2*time.Second)

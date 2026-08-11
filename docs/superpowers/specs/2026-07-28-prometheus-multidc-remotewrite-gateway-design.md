@@ -1114,12 +1114,12 @@ rulesets:
 
 - 每条 ruleset = 一条独立 pipeline(独立 goroutine、配置版本)
 - Stage 顺序固定(因有数据依赖)
-- 每个 stage 是无状态函数 `func([]Sample, RuleConfig) ([]Sample, error)`
+- 每个 stage 是编译期构建的函数 `func(ctx context.Context, in, prev []Sample) (out []Sample, dropped int, err error)`,配置在编译期捕获;relabel / enrich / route / sample 为无状态,downsample / deadvalue 为有状态(窗口内聚合)
 - 跨 ruleset 故障隔离
 
 ### 5.3 性能
 
-- 编译后的正则、聚合函数缓存在 `atomic.Value`
+- 编译后的正则、聚合函数缓存在 `atomic.Pointer[T]`(等价 `atomic.Value`,泛型版)
 - Stage 接收批量 `[]Sample`,非单条
 - sync.Pool 复用 encoder/buffer
 - 每个 stage 输出 metric:`processed_count / dropped_count / duration_ms`

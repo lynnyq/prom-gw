@@ -69,6 +69,24 @@
   - **§9.2 Flink JM 数量**:三城 Flink 从 "1 JM" 修正为 "2 JM"(1 Active + 1 Standby),与 §2.2.2 资源清单和 §2.2.1 拓扑图一致
   - **§6.3 / §11 Flink 去重键**:从 `tenant + metric + labels_hash + ts + ingest_city` 修正为 `ts + metric + tenant + business + ingest_city + source_dc + labels_hash`,与 StarRocks PK 完全对齐(原缺 `business` / `source_dc` 可能导致跨业务/跨机房同指标误去重)
   - **§4.6.2 行字节估算**:5m 表单行从 "≈ 125 字节" 修正为 "≈ 120 字节",与 §2.2.6 (4) 及日增计算公式(1000w × 288 × 120 B = 345 GB)一致
+- **功能代码与设计文档一致性审核修复(P0×2 / P1×14 / P2×7)**:
+  - **P0-1 WAL 故障转移失效**:`internal/sink/sink.go` `AdapterSink.Send` 在 `ErrProduceBackpressure`(Kafka broker 宕机 → channel 满)时直接返回 503,WAL 未触发;修正为 backpressure 时 fall through 到 WAL 写入,WAL 满才返回 503(§6.1)
+  - **P0-2 成功状态码 204→200**:`internal/receiver/server.go` 从 `StatusNoContent` 改为 `StatusOK`,与 §4.2 流程图 `[200 OK → Prometheus]` 一致
+  - **P1-1 Kafka delivery timeout/retries**:`internal/kafkasink/producer.go` 补 `RecordDeliveryTimeout(120s)` + `RecordRetries(10)`,对应 §6.3 `delivery.timeout.ms=120000` / `retries=10`(原 franz-go 默认 0=无限重试)
+  - **P1-2 WAL active segment 恢复**:`internal/wal/wal.go` `scanExisting` 检测到未 seal 的 `.log` 文件时,读取有效记录(容错截断)→ 写 footer → 重命名为 `.sealed`,纳入 `Replay` 路径(§6.2 Reopen replay consistency)
+  - **P1-3 Pipeline Stop drain**:`internal/sink/pipeline.go` `Stop()` 改为 `close(ch) → wg.Wait()(drain) → cancel(ctx)`,避免先 cancel ctx 导致 worker 丢弃 channel 内消息(§6.5)
+  - **P1-4 drainWAL 同步 ack**:`internal/sink/sink.go` 新增 `sendToKafkaSync()`(用 `ProduceWithCallback` + channel 等 ack),`drainWAL` 改用同步路径,仅 broker ack 成功才标记 `.done`(§6.3 at-least-once)
+  - **P1-5~P1-8 规则 YAML schema 对齐**:`internal/ruleengine/types.go` + `stage.go` — `source_topic` → `input_topic`;Stage 实现 `UnmarshalYAML` 读 inline 字段(非 `config:` 嵌套);`labels` → `add_labels`;Route 同时支持 `match`/`to_topic`(设计)与 `rules` 数组(兼容)
+  - **P1-9~P1-11 scope/metric_regex**:`stage.go` / `downsample.go` / `deadvalue.go` 补 `scope: { metric_regex: "..." }`,仅匹配 metric 的 sample 被采样/下采样/死值检测,不匹配的 pass through
+  - **P1-12 Stage 顺序校验**:`types.go` `Validate()` 新增顺序检查(relabel→enrich→route→sample→downsample→deadvalue);relabel 允许多条,其余 type 拒绝重复
+  - **P1-13 Tracer resource 属性**:`internal/obs/tracing.go` `TracingConfig` 新增 `IngestCity`/`SourceDC`,resource attributes 补 `ingest_city`/`source_dc`(§7.2 所有 span 必带)
+  - **P1-14 指标 label + admin trace_id**:`obs/metrics.go` `gateway_ruleset_version` label 从 `name` 改为 `ruleset`(与 §7.1 + `gateway_ruleset_processed_total` 一致);`admin/server.go` `tracingMW` 改用 OTel span(从 `otel.GetTextMapPropagator().Extract` + `obs.Tracer.Start`),响应体 `trace_id` 不再恒空
+  - **P2-1 Admin safego**:`admin/server.go` `recoverMW` 新增 `safego.ReportPanic` 调用(新增 `pkg/safego.ReportPanic` 公开函数),panic 计入 `gateway_panic_recovered_total`(§6.6)
+  - **P2-2 Admin 日志字段**:所有 admin 日志补 `ingest_city`/`source_dc`/`stage` 字段(§7.3)
+  - **P2-3 Kafka Close 超时**:`kafkasink/producer.go` `Close()` 加 30s 超时(`DefaultCloseTimeout`),避免 RecordTimeout=0 时永久阻塞(§6.5)
+  - **P2-4 Close 顺序**:`sink/sink.go` `AdapterSink.Close()` 改为先关 WAL 再关 Kafka(§6.5 Flush WAL → Close producer)
+  - **P2-5 Close 等 monitor**:`sink/sink.go` 新增 `sync.WaitGroup` 跟踪 monitor goroutine,`Close()` 等 `wg.Wait()` 后返回
+  - **P2-6/P2-7 设计文档签名对齐**:§5.2 stage 函数签名更新为 `func(ctx, in, prev) (out, dropped, err)`;§5.3 `atomic.Value` 更新为 `atomic.Pointer[T]`(等价泛型版)
 
 ### Fixed
 

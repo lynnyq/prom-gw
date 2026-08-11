@@ -268,7 +268,11 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody(4007, "decode: "+err.Error()))
 		return
 	}
-	decodeSpan.SetAttributes(attribute.Int("timeseries", len(req.Timeseries)))
+	decodeSpan.SetAttributes(
+		attribute.Int("timeseries", len(req.Timeseries)),
+		attribute.String("ingest_city", ingestCity),
+		attribute.String("source_dc", sourceDC),
+	)
 	decodeSpan.End()
 	obs.StageDuration.WithLabelValues("decode", "ok", ingestCity).Observe(time.Since(start).Seconds())
 
@@ -300,12 +304,14 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		parseSpan.End()
 		obs.ErrorsTotal.WithLabelValues("parse", "meta_missing", ingestCity, sourceDC).Inc()
 		s.cfg.Logger.Error("parse failed (internal)", zap.Error(err))
-		writeJSON(w, http.StatusInternalServerError, errorBody(5001, "internal: meta missing"))
+		writeJSON(w, http.StatusInternalServerError, errorBody(1500, "internal: meta missing"))
 		return
 	}
 	parseSpan.SetAttributes(
 		attribute.Int("samples", len(res.Samples)),
 		attribute.Int("parse_errors", int(res.ParseError)),
+		attribute.String("ingest_city", ingestCity),
+		attribute.String("source_dc", sourceDC),
 	)
 	parseSpan.End()
 	if res.ParseError > 0 {
@@ -321,13 +327,14 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 			span.SetStatus(codes.Error, err.Error())
 			obs.ErrorsTotal.WithLabelValues("sink", "handler_error", ingestCity, sourceDC).Inc()
 			s.cfg.Logger.Error("handler failed", zap.Error(err))
-			writeJSON(w, http.StatusServiceUnavailable, errorBody(5031, "downstream unavailable"))
+			writeJSON(w, http.StatusServiceUnavailable, errorBody(1501, "downstream unavailable"))
 			return
 		}
 	}
 
 	obs.RequestDuration.WithLabelValues("/api/v1/write", "ok", ingestCity).Observe(time.Since(start).Seconds())
-	w.WriteHeader(http.StatusNoContent)
+	// spec §4.2: 成功返回 200 OK(Prometheus remote_write 接受 200/204,设计文档统一为 200)
+	w.WriteHeader(http.StatusOK)
 }
 
 // --- helpers ---
