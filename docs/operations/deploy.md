@@ -6,6 +6,8 @@
 - 典型部署:每机房 2~4 个 prom-gw 实例 + LB(nginx/haproxy) + 中心 Kafka
 - WAL 目录建议独立挂载 SSD(/data/wal),与系统盘分离,避免 fsync 阻塞
 
+> 高可用与负载均衡详细配置(Nginx/Keepalived/HAProxy)见 [高可用与负载均衡部署指南](ha-lb-deployment.md)。
+
 ## 2. 硬件基线
 
 | 资源 | 建议 | 备注 |

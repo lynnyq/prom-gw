@@ -1092,6 +1092,7 @@ bin/kafka-storage.sh format \
 - [Flink 消费 Kafka 写 StarRocks 开发指南](flink-consumer-guide.md)
 - [部署速查](deploy.md)
 - [故障剧本](runbook.md)
+- [压力测试指南与报告](stress-test-guide.md)
 - [5 分钟接入](../user/quickstart.md)
 - [Ruleset 配置参考](../user/ruleset-reference.md)
 - [设计文档](../superpowers/specs/2026-07-28-prometheus-multidc-remotewrite-gateway-design.md)

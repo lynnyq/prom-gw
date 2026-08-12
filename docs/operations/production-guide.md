@@ -1411,6 +1411,7 @@ RestrictNamespaces=true
 - [故障剧本](runbook.md)
 - [SLO 指标](slo.md)
 - [排障手册](troubleshooting.md)
+- [高可用与负载均衡部署指南](ha-lb-deployment.md)
 - [Ruleset 配置参考](../user/ruleset-reference.md)
 - [5 分钟接入](../user/quickstart.md)
 - [鉴权说明](../user/auth.md)
