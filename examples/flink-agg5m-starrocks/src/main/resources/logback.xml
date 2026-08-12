@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- prom-gw flink 工程日志级别 -->
+  <logger name="com.example.promgw" level="INFO"/>
+  <!-- 解码细节降级到 DEBUG,避免大量日志 -->
+  <logger name="com.example.promgw.decoder" level="WARN"/>
+  <!-- Stream Load 细节 INFO 即可 -->
+  <logger name="com.example.promgw.sink" level="INFO"/>
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT"/>
+  </root>
+</configuration>
