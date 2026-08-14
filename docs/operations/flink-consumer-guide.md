@@ -199,7 +199,7 @@ Flink 通常消费 **路由后(cleaned/routed)的 topic**,因为这些数据已�
 ### 3.3 Flink 集群
 
 - **生产**:每城 JM×2(1 Active + 1 Standby)+ ZK×3 + TM×2~6
-- **版本**:Flink 1.17+(建议 1.18)
+- **版本**:Flink 1.19+(建议 1.19.2)
 - **JDK**:Java 17
 - **每 TM**:16C/32G/500G SSD,4 slot
 - **状态后端**:RocksDB(增量 checkpoint)
@@ -299,7 +299,7 @@ GROUP BY date_trunc('hour', ts), metric, tenant, business, ingest_city, source_d
   <packaging>jar</packaging>
 
   <properties>
-    <flink.version>1.18.0</flink.version>
+    <flink.version>1.19.2</flink.version>
     <java.version>17</java.version>
     <prometheus.version>0.16.0</prometheus.version>
   </properties>
@@ -352,7 +352,7 @@ GROUP BY date_trunc('hour', ts), metric, tenant, business, ingest_city, source_d
     <dependency>
       <groupId>com.starrocks.connector</groupId>
       <artifactId>flink-connector-starrocks</artifactId>
-      <version>1.2.9_flink-1.18</version>
+      <version>1.2.9_flink-1.19</version>
     </dependency>
 
     <!-- 日志 -->
@@ -1285,6 +1285,8 @@ T+1d      StarRocks 周期任务:1h → 1d 表
 
 - [本地开发部署指南](local-dev-guide.md)
 - [生产部署指南](production-guide.md)
+- [Flink 集群生产部署](flink-production-deployment.md) — JM HA、作业管理、Checkpoint/Savepoint
+- [Kafka 生产部署](kafka-production-deployment.md) — SASL/SSL、监控、运维
 - [设计文档 §4.5 Flink 同城聚合](../superpowers/specs/2026-07-28-prometheus-multidc-remotewrite-gateway-design.md)
 - [设计文档 §4.6 StarRocks 表模型](../superpowers/specs/2026-07-28-prometheus-multidc-remotewrite-gateway-design.md)
 - [Ruleset 配置参考](../user/ruleset-reference.md)

@@ -120,9 +120,9 @@ cd bigdata
 
 ```bash
 cd ~
-wget https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz
-tar -xzf kafka_2.13-3.7.0.tgz
-ln -s kafka_2.13-3.7.0 kafka
+wget https://archive.apache.org/dist/kafka/3.4.0/kafka_2.13-3.4.0.tgz
+tar -xzf kafka_2.13-3.4.0.tgz
+ln -s kafka_2.13-3.4.0 kafka
 cd kafka
 ```
 

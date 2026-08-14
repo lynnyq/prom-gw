@@ -86,7 +86,7 @@ prom-gw 自带两个压测工具,无需引入第三方依赖:
 | 组件 | 版本 | 备注 |
 |---|---|---|
 | Go | ≥ 1.21 | 编译 prom-gw 和 loadgen |
-| Kafka | ≥ 3.7(KRaft) | 可选,WAL-only 模式可跳过 |
+| Kafka | ≥ 3.4(KRaft) | 可选,WAL-only 模式可跳过 |
 | curl | 任意 | 健康检查和 metrics 抓取 |
 | Go pprof | 内置 | CPU/heap profile 分析 |
 

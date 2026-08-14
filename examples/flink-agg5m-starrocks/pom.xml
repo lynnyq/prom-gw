@@ -39,8 +39,8 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.source>11</maven.compiler.source>
     <maven.compiler.target>11</maven.compiler.target>
-    <flink.version>1.18.0</flink.version>
-    <flink.kafka.version>3.2.0-1.18</flink.kafka.version>
+    <flink.version>1.19.2</flink.version>
+    <flink.kafka.version>3.3.0-1.19</flink.kafka.version>
     <protobuf.version>3.25.1</protobuf.version>
     <jackson.version>2.16.0</jackson.version>
   </properties>

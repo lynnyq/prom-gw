@@ -111,7 +111,7 @@ DC-C Prometheus ─┘                        └─> Kafka SZ ─> Flink SZ ─
 
 > 三台 Broker 物理机均执行以下步骤。
 
-**JDK 17 安装**(Kafka 3.7+ KRaft 要求 JDK 11/17):
+**JDK 17 安装**(Kafka 3.4+ KRaft 要求 JDK 11/17):
 
 ```bash
 # CentOS / RHEL
@@ -154,13 +154,13 @@ kafka  soft  nproc   100000
 kafka  hard  nproc   100000
 ```
 
-**下载并安装 Kafka**(3.7.0, Scala 2.13):
+**下载并安装 Kafka**(3.4.0, Scala 2.13):
 
 ```bash
 cd /opt
-sudo wget https://archive.apache.org/dist/kafka/3.7.0/kafka_2.13-3.7.0.tgz
-sudo tar -xzf kafka_2.13-3.7.0.tgz
-sudo ln -s kafka_2.13-3.7.0 kafka
+sudo wget https://archive.apache.org/dist/kafka/3.4.0/kafka_2.13-3.4.0.tgz
+sudo tar -xzf kafka_2.13-3.4.0.tgz
+sudo ln -s kafka_2.13-3.4.0 kafka
 sudo chown -R kafka:kafka /opt/kafka
 ls /opt/kafka/bin/kafka-server-start.sh   # 确认解压成功
 ```
@@ -1412,6 +1412,8 @@ RestrictNamespaces=true
 - [SLO 指标](slo.md)
 - [排障手册](troubleshooting.md)
 - [高可用与负载均衡部署指南](ha-lb-deployment.md)
+- [Kafka 生产部署](kafka-production-deployment.md) — SASL/SSL、监控、运维、扩缩容
+- [Flink 生产部署](flink-production-deployment.md) — JM HA、作业管理、Checkpoint
 - [Ruleset 配置参考](../user/ruleset-reference.md)
 - [5 分钟接入](../user/quickstart.md)
 - [鉴权说明](../user/auth.md)
