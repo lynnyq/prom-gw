@@ -1,8 +1,8 @@
 # Kafka 生产部署完整步骤
 
-> 本文档覆盖 prom-gw 配套 Kafka 集群的生产环境完整部署,包括 KRaft 集群搭建、SASL/SSL 安全认证、监控告警、Topic 管理、性能调优、扩缩容、备份恢复和灾难恢复。
+> 本文档覆盖 prom-gw 配套 Kafka 集群的生产环境完整部署,采用 KRaft 模式 + PLAINTEXT 协议(不启用 SSL/SASL 等任何认证),包括集群搭建、监控告警、Topic 管理、性能调优、扩缩容、备份恢复和灾难恢复。
 >
-> 基础安装步骤( JDK / 系统调优 / KRaft 格式化 / Topic 创建)见 [生产部署指南 §3](production-guide.md#3-kafka-集群部署),本文档聚焦**安全、监控、运维和调优**,与 §3 互补。
+> 基础安装步骤( JDK / 系统调优 / KRaft 格式化 / Topic 创建)见 [生产部署指南 §3](production-guide.md#3-kafka-集群部署),本文档聚焦**监控、运维和调优**,与 §3 互补。
 >
 > 配套文档:[生产部署指南](production-guide.md)、[高可用与负载均衡](ha-lb-deployment.md)、[Flink 生产部署](flink-production-deployment.md)、[压力测试指南](stress-test-guide.md)、[故障剧本](runbook.md)
 
@@ -11,15 +11,14 @@
 1. [部署架构](#1-部署架构)
 2. [前置准备](#2-前置准备)
 3. [KRaft 集群安装](#3-kraft-集群安装)
-4. [SASL/SSL 安全配置](#4-saslssl-安全配置)
-5. [Topic 管理与最佳实践](#5-topic-管理与最佳实践)
-6. [监控部署](#6-监控部署)
-7. [性能调优](#7-性能调优)
-8. [运维操作](#8-运维操作)
-9. [扩容与缩容](#9-扩容与缩容)
-10. [备份与恢复](#10-备份与恢复)
-11. [灾难恢复](#11-灾难恢复)
-12. [附录](#12-附录)
+4. [Topic 管理与最佳实践](#4-topic-管理与最佳实践)
+5. [监控部署](#5-监控部署)
+6. [性能调优](#6-性能调优)
+7. [运维操作](#7-运维操作)
+8. [扩容与缩容](#8-扩容与缩容)
+9. [备份与恢复](#9-备份与恢复)
+10. [灾难恢复](#10-灾难恢复)
+11. [附录](#11-附录)
 
 ---
 
@@ -27,7 +26,7 @@
 
 ### 1.1 单机房标准拓扑
 
-每机房部署 3 Broker KRaft 模式(无 ZooKeeper),跨 2 个 AZ 分布:
+每机房部署 3 Broker KRaft 模式(无 ZooKeeper),跨 2 个 AZ 分布,采用 PLAINTEXT 协议(不启用 SSL/SASL):
 
 ```
 机房 (深圳)
@@ -35,7 +34,7 @@
 │                                      │  │                       │
 │  Kafka-1 (broker+controller)         │  │  Kafka-3              │
 │  broker.id=1, rack=az-1             │  │  broker.id=3           │
-│  10.0.1.21:9094(PLAINTEXT)          │  │  rack=az-2            │
+│  10.0.1.21:9092(PLAINTEXT)          │  │  rack=az-2            │
 │  10.0.1.21:9093(CONTROLLER)         │  │  10.0.1.23            │
 │                                      │  │                       │
 │  Kafka-2 (broker+controller)         │  │                       │
@@ -46,7 +45,7 @@
 
                    │
                    │ prom-gw / Flink 消费
-                   │ SASL_SSL → 9094
+                   │ PLAINTEXT → 9092
                    ▼
           ┌─────────────────┐
           │  prom-gw × 4    │
@@ -54,21 +53,37 @@
           └─────────────────┘
 ```
 
+> **安全说明**:本部署不启用 SSL/SASL 认证,通过**网络隔离**(VPC / 安全组)保证 Kafka 只对 prom-gw / Flink 网段开放 9092 端口。生产环境务必确保 Kafka 不暴露在公网。
+
 ### 1.2 端口规划
 
 | 端口 | 协议 | 用途 | 暴露范围 |
 |---|---|---|---|
-| 9092 | PLAINTEXT | 本地调试(仅 dev) | 127.0.0.1 |
+| 9092 | PLAINTEXT | 客户端访问(Broker 间 + 生产/消费) | prom-gw / Flink 网段 |
 | 9093 | CONTROLLER | KRaft 控制器间通信 | Kafka 节点间 |
-| 9094 | SASL_SSL | 生产客户端访问 | prom-gw / Flink 网段 |
+| 9404 | HTTP | JMX Exporter 指标暴露 | Prometheus 网段 |
 
 ### 1.3 资源规划
 
 | 角色 | 规格 | 数量 | 磁盘 |
 |---|---|---|---|
-| Kafka Broker | 64C/512G | 3 | 12×16T HDD(JBOD) |
+| Kafka Broker | 64C/512G | 3 | 11×16T HDD(JBOD) |
 | prom-gw(客户端) | 8C/16G | 2-4 | 100G SSD(WAL) |
 | Flink TM(客户端) | 16C/32G | 2-6 | 500G SSD(state) |
+
+### 1.4 网络隔离建议
+
+不启用 Kafka 认证时,必须通过网络层保证安全:
+
+```bash
+# 安全组示例(仅放行 prom-gw / Flink 网段)
+# 入方向:
+#   9092  源:10.0.2.0/24 (prom-gw 网段)
+#                10.0.3.0/24 (Flink 网段)
+#   9093  源:10.0.1.21, 10.0.1.22, 10.0.1.23 (Kafka 节点间)
+#   9404  源:10.0.10.10 (Prometheus)
+# 出方向:全部放行
+```
 
 ---
 
@@ -84,23 +99,27 @@ cat /etc/redhat-release
 cat /etc/os-release
 ```
 
-### 2.2 JDK 17 安装
+### 2.2 OpenJDK 25 安装
 
 ```bash
 # CentOS / RHEL
-sudo yum install -y java-17-openjdk java-17-openjdk-devel
+sudo yum install -y java-25-openjdk java-25-openjdk-devel
 # Ubuntu / Debian
-sudo apt install -y openjdk-17-jdk
+sudo apt install -y openjdk-25-jdk
 
-java -version   # 期望: openjdk version "17.x.x"
+java -version   # 期望: openjdk version "25.x.x"
 ```
 
 ### 2.3 创建 Kafka 用户与目录
 
 ```bash
-sudo useradd -r -m -d /opt/kafka -s /sbin/nologin kafka
-sudo mkdir -p /opt/kafka /data/kafka /var/log/kafka
-sudo chown -R kafka:kafka /opt/kafka /data/kafka /var/log/kafka
+sudo useradd -r -m -d /appdata/kafka -s /sbin/nologin kafka
+sudo mkdir -p /appdata/kafka /applog/kafka
+# 11 个 JBOD 挂载点下的数据目录
+for i in 01 02 03 04 05 06 07 08 09 10 11; do
+    sudo mkdir -p /data${i}/kafka
+done
+sudo chown -R kafka:kafka /appdata/kafka /applog/kafka /data01/kafka /data02/kafka /data03/kafka /data04/kafka /data05/kafka /data06/kafka /data07/kafka /data08/kafka /data09/kafka /data10/kafka /data11/kafka
 ```
 
 ### 2.4 内核参数调优
@@ -145,16 +164,25 @@ kafka  hard  nproc   100000
 
 ### 2.6 磁盘挂载(JBOD)
 
-每台 Kafka 物理机 12 × 16T HDD,JBOD 模式(不做 RAID,Kafka 自带副本冗余):
+每台 Kafka 物理机 11 × 16T HDD,JBOD 模式(不做 RAID,Kafka 自带副本冗余):
 
 ```bash
 # /etc/fstab
-/dev/sdb1 /data/kafka/log-0  ext4 noatime,nodiratime 0 2
-/dev/sdc1 /data/kafka/log-1  ext4 noatime,nodiratime 0 2
-# ... 依此类推到 log-11
+/dev/sdb1 /data01  ext4 noatime,nodiratime 0 2
+/dev/sdc1 /data02  ext4 noatime,nodiratime 0 2
+/dev/sdd1 /data03  ext4 noatime,nodiratime 0 2
+/dev/sde1 /data04  ext4 noatime,nodiratime 0 2
+/dev/sdf1 /data05  ext4 noatime,nodiratime 0 2
+/dev/sdg1 /data06  ext4 noatime,nodiratime 0 2
+/dev/sdh1 /data07  ext4 noatime,nodiratime 0 2
+/dev/sdi1 /data08  ext4 noatime,nodiratime 0 2
+/dev/sdj1 /data09  ext4 noatime,nodiratime 0 2
+/dev/sdk1 /data10  ext4 noatime,nodiratime 0 2
+/dev/sdl1 /data11  ext4 noatime,nodiratime 0 2
 
-sudo mkdir -p /data/kafka/log-{0..11}
-sudo chown -R kafka:kafka /data/kafka
+sudo mount -a
+sudo mkdir -p /data{01..11}/kafka
+sudo chown -R kafka:kafka /data{01..11}/kafka
 ```
 
 > **为什么不用 RAID?** Kafka 通过副本机制保证数据可靠性,JBOD 模式下单盘故障只影响该盘上的 partition,其他盘不受影响。RAID 会增加写放大和性能开销。
@@ -162,19 +190,19 @@ sudo chown -R kafka:kafka /data/kafka
 ### 2.7 下载并安装 Kafka
 
 ```bash
-cd /opt
+cd /appdata
 sudo wget https://archive.apache.org/dist/kafka/3.4.0/kafka_2.13-3.4.0.tgz
 sudo tar -xzf kafka_2.13-3.4.0.tgz
 sudo ln -s kafka_2.13-3.4.0 kafka
-sudo chown -R kafka:kafka /opt/kafka
-ls /opt/kafka/bin/kafka-server-start.sh   # 确认解压成功
+sudo chown -R kafka:kafka /appdata/kafka
+ls /appdata/kafka/bin/kafka-server-start.sh   # 确认解压成功
 ```
 
 ---
 
 ## 3. KRaft 集群安装
 
-> 基础安装(JDK / 系统调优 / Kafka 下载)见 [生产部署指南 §3.1-§3.3](production-guide.md#31-前置准备jdk--用户--系统调优--安装),本节聚焦安全配置和 KRaft 格式化。
+> 基础安装(JDK / 系统调优 / Kafka 下载)见 [生产部署指南 §3.1-§3.3](production-guide.md#31-前置准备jdk--用户--系统调优--安装),本节聚焦 KRaft 配置与格式化。
 
 ### 3.1 集群规划
 
@@ -188,7 +216,7 @@ ls /opt/kafka/bin/kafka-server-start.sh   # 确认解压成功
 
 ### 3.2 Broker 配置
 
-**`/opt/kafka/config/server.properties`(Broker 1 示例,Broker 2/3 修改 broker.id / node.id / advertised.listeners / rack)**:
+**`/appdata/kafka/config/server.properties`(Broker 1 示例,Broker 2/3 修改 broker.id / node.id / advertised.listeners / rack)**:
 
 ```properties
 # ====== 基础 ======
@@ -197,36 +225,21 @@ process.roles=broker,controller
 node.id=1
 controller.quorum.voters=1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
 
-# ====== 监听器 ======
-# PLAINTEXT://9094 用于 SASL_SSL 客户端通信
+# ====== 监听器(PLAINTEXT,不启用 SSL/SASL) ======
+# PLAINTEXT://9092 用于客户端通信(生产/消费)
 # CONTROLLER://9093 用于 KRaft 控制器间通信
-listeners=SASL_SSL://:9094,CONTROLLER://:9093
-advertised.listeners=SASL_SSL://kafka-1:9094
+listeners=PLAINTEXT://:9092,CONTROLLER://:9093
+advertised.listeners=PLAINTEXT://kafka-1:9092
 controller.listener.names=CONTROLLER
-inter.broker.listener.name=SASL_SSL
+inter.broker.listener.name=PLAINTEXT
 
-# ====== 监听器安全协议 ======
-listener.security.protocol.map=CONTROLLER:SASL_SSL,SASL_SSL:SASL_SSL
+# ====== 监听器安全协议映射 ======
+listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
 control.plane.listener.name=CONTROLLER
 
-# ====== SASL 配置 ======
-sasl.enabled.mechanisms=SCRAM-SHA-512
-sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
-sasl.mechanism.controller.protocol=SCRAM-SHA-512
-authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
-
-# ====== SSL 配置 ======
-ssl.keystore.location=/opt/kafka/ssl/kafka.keystore.jks
-ssl.keystore.password=<keystore-password>
-ssl.key.password=<key-password>
-ssl.truststore.location=/opt/kafka/ssl/kafka.truststore.jks
-ssl.truststore.password=<truststore-password>
-ssl.client.auth=required
-ssl.endpoint.identification.algorithm=HTTPS
-
 # ====== 日志目录(JBOD) ======
-log.dirs=/data/kafka/log-0,/data/kafka/log-1,/data/kafka/log-2,/data/kafka/log-3,/data/kafka/log-4,/data/kafka/log-5,/data/kafka/log-6,/data/kafka/log-7,/data/kafka/log-8,/data/kafka/log-9,/data/kafka/log-10,/data/kafka/log-11
-metadata.log.dir=/data/kafka/log-0
+log.dirs=/data01/kafka,/data02/kafka,/data03/kafka,/data04/kafka,/data05/kafka,/data06/kafka,/data07/kafka,/data08/kafka,/data09/kafka,/data10/kafka,/data11/kafka
+metadata.log.dir=/data01/kafka
 
 # ====== Topic 默认 ======
 num.partitions=64
@@ -258,9 +271,11 @@ transaction.state.log.replication.factor=3
 transaction.state.log.min.isr=2
 ```
 
+> **注意**:本配置不包含任何 `sasl.*` / `ssl.*` / `authorizer.class.name` 参数,即不启用 SASL 认证、SSL 加密和 ACL 授权。安全由网络隔离保障(见 §1.4)。
+
 ### 3.3 JVM 配置
 
-修改 `/opt/kafka/bin/kafka-server-start.sh` 或通过 systemd `Environment` 传入:
+修改 `/appdata/kafka/bin/kafka-server-start.sh` 或通过 systemd `Environment` 传入:
 
 ```bash
 export KAFKA_HEAP_OPTS="-Xms32g -Xmx32g -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
@@ -280,7 +295,7 @@ export KAFKA_JVM_PERFORMANCE_OPTS="-XX:+ExplicitGCInvokesConcurrent -XX:+AlwaysP
 
 ```ini
 [Unit]
-Description=Apache Kafka (KRaft mode)
+Description=Apache Kafka (KRaft mode, PLAINTEXT)
 After=network.target
 
 [Service]
@@ -289,9 +304,8 @@ User=kafka
 Group=kafka
 Environment="KAFKA_HEAP_OPTS=-Xms32g -Xmx32g -XX:+UseG1GC -XX:MaxGCPauseMillis=20"
 Environment="KAFKA_JVM_PERFORMANCE_OPTS=-XX:+AlwaysPreTouch -Djava.awt.headless=true"
-Environment="KAFKA_OPTS=-Djava.security.auth.login.config=/opt/kafka/config/kafka_server_jaas.conf"
-ExecStart=/opt/kafka/bin/kafka-server-start.sh /opt/kafka/config/server.properties
-ExecStop=/opt/kafka/bin/kafka-server-stop.sh
+ExecStart=/appdata/kafka/bin/kafka-server-start.sh /appdata/kafka/config/server.properties
+ExecStop=/appdata/kafka/bin/kafka-server-stop.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=100000
@@ -302,7 +316,7 @@ TimeoutStopSec=300
 # 安全加固
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/data/kafka /var/log/kafka /tmp
+ReadWritePaths=/data01/kafka /data02/kafka /data03/kafka /data04/kafka /data05/kafka /data06/kafka /data07/kafka /data08/kafka /data09/kafka /data10/kafka /data11/kafka /applog/kafka /tmp
 
 [Install]
 WantedBy=multi-user.target
@@ -317,221 +331,36 @@ sudo systemctl enable kafka
 
 ```bash
 # 1. 生成 Cluster UUID(所有 Broker 共用一个)
-CLUSTER_UUID=$(/opt/kafka/bin/kafka-storage.sh random-uuid)
+CLUSTER_UUID=$(/appdata/kafka/bin/kafka-storage.sh random-uuid)
 echo "Cluster UUID: $CLUSTER_UUID"
 # 将此 UUID 同步到所有 Broker 节点
 
 # 2. 每台 Broker 格式化(在 3 台机器上分别执行)
-/opt/kafka/bin/kafka-storage.sh format \
-  --config /opt/kafka/config/server.properties \
-  --cluster-id $CLUSTER_UUID \
-  --add-scram
+/appdata/kafka/bin/kafka-storage.sh format \
+  --config /appdata/kafka/config/server.properties \
+  --cluster-id $CLUSTER_UUID
 
-# 3. 添加 inter-broker SCRAM 用户(在 Broker-1 上执行一次)
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --alter \
-  --add-config 'SCRAM-SHA-512=[password=KafkaInterBroker@2026]' \
-  --entity-type users \
-  --entity-name interbroker
-
-# 4. 启动所有 Broker
+# 3. 启动所有 Broker
 sudo systemctl start kafka
 
-# 5. 验证
-/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties | head
+# 4. 验证集群状态(无需 --command-config,PLAINTEXT 直连)
+/appdata/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-1:9092 | head
 ```
 
-> **注意**:格式化前确保 `/data/kafka/log-*` 为空,否则会报 Cluster ID mismatch。
+> **注意**:格式化前确保 `/data01/kafka` ~ `/data11/kafka` 为空,否则会报 Cluster ID mismatch。
 
 ---
 
-## 4. SASL/SSL 安全配置
+## 4. Topic 管理与最佳实践
 
-### 4.1 生成 SSL 证书
-
-```bash
-# 1. 生成 CA
-openssl genrsa -out ca-key 4096
-openssl req -new -x509 -key ca-key -out ca-cert -days 3650 \
-    -subj "/CN=Kafka-CA/O=prom-gw/C=CN"
-
-# 2. 为每个 Broker 生成密钥库(Broker 1 示例)
-keytool -keystore kafka-1.keystore.jks -alias kafka-1 \
-    -validity 3650 -genkey -keyalg RSA \
-    -dname "CN=kafka-1,O=prom-gw,C=CN" \
-    -ext SAN=DNS:kafka-1,DNS:kafka-1.sz,IP:10.0.1.21
-
-# 3. 生成 CSR
-keytool -keystore kafka-1.keystore.jks -alias kafka-1 \
-    -certreq -file kafka-1.csr
-
-# 4. 用 CA 签名
-openssl x509 -req -CA ca-cert -CAkey ca-key -in kafka-1.csr \
-    -out kafka-1-cert -days 3650 -CAcreateserial \
-    -extfile <(echo "subjectAltName=DNS:kafka-1,DNS:kafka-1.sz,IP:10.0.1.21")
-
-# 5. 导入 CA 和签名证书到密钥库
-keytool -keystore kafka-1.keystore.jks -alias CARoot \
-    -import -file ca-cert -noprompt
-keytool -keystore kafka-1.keystore.jks -alias kafka-1 \
-    -import -file kafka-1-cert -noprompt
-
-# 6. 生成信任库(所有 Broker 共用)
-keytool -keystore kafka.truststore.jks -alias CARoot \
-    -import -file ca-cert -noprompt
-
-# 7. 部署到 Broker
-sudo mkdir -p /opt/kafka/ssl
-sudo cp kafka-1.keystore.jks kafka.truststore.jks /opt/kafka/ssl/
-sudo chown -R kafka:kafka /opt/kafka/ssl
-sudo chmod 600 /opt/kafka/ssl/*.jks
-```
-
-> 对 Broker-2、Broker-3 重复步骤 2-7,替换对应的 CN/DNS/IP。
-
-### 4.2 SCRAM 用户管理
-
-```bash
-# 创建 prom-gw 用户
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --alter \
-  --add-config 'SCRAM-SHA-512=[password=PromGw@2026]' \
-  --entity-type users \
-  --entity-name prom-gw \
-  --command-config /opt/kafka/config/admin-client.properties
-
-# 创建 Flink 用户
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --alter \
-  --add-config 'SCRAM-SHA-512=[password=Flink@2026]' \
-  --entity-type users \
-  --entity-name flink \
-  --command-config /opt/kafka/config/admin-client.properties
-
-# 创建 admin 用户
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --alter \
-  --add-config 'SCRAM-SHA-512=[password=Admin@2026]' \
-  --entity-type users \
-  --entity-name admin \
-  --command-config /opt/kafka/config/admin-client.properties
-
-# 查看用户列表
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --describe \
-  --entity-type users \
-  --command-config /opt/kafka/config/admin-client.properties
-```
-
-### 4.3 JAAS 配置文件
-
-**Broker 侧 — `/opt/kafka/config/kafka_server_jaas.conf`**:
-
-```
-KafkaServer {
-    org.apache.kafka.common.security.scram.ScramLoginModule required
-    username="interbroker"
-    password="KafkaInterBroker@2026";
-};
-```
-
-**Admin 客户端 — `/opt/kafka/config/admin-client.properties`**:
-
-```properties
-security.protocol=SASL_SSL
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required \
-    username="admin" \
-    password="Admin@2026";
-ssl.truststore.location=/opt/kafka/ssl/kafka.truststore.jks
-ssl.truststore.password=<truststore-password>
-```
-
-### 4.4 prom-gw 客户端配置
-
-prom-gw 通过环境变量配置 Kafka SASL/SSL:
-
-```bash
-# prom-gw systemd 或启动脚本
-export KAFKA_BROKERS=kafka-1:9094,kafka-2:9094,kafka-3:9094
-export KAFKA_SASL_MECHANISM=SCRAM-SHA-512
-export KAFKA_SASL_USER=prom-gw
-export KAFKA_SASL_PASSWORD=PromGw@2026
-export KAFKA_SSL_ENABLED=true
-export KAFKA_SSL_CA=/opt/prom-gw/ssl/ca-cert
-```
-
-### 4.5 Flink 客户端配置
-
-Flink 作业通过 `--kafka-brokers` 等参数配置(见 [Flink 生产部署](flink-production-deployment.md)):
-
-```bash
-flink run ... \
-  --kafka-brokers kafka-1:9094,kafka-2:9094,kafka-3:9094 \
-  --env prod \
-  ...
-```
-
-`JobConfig.applyEnvPreset()` 自动设置 `SASL_SSL` + `SCRAM-SHA-512`。
-
-### 4.6 ACL 权限控制
-
-```bash
-# prom-gw 用户:只能写 prom.*.raw.* 和 prom.*.routed.* topic
-/opt/kafka/bin/kafka-acls.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  --add \
-  --allow-principal User:prom-gw \
-  --producer \
-  --topic "prom." \
-  --resource-pattern-type prefixed
-
-# Flink 用户:只能读 prom.*.routed.* topic,只能写 prom.*.dlq.* topic
-/opt/kafka/bin/kafka-acls.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  --add \
-  --allow-principal User:flink \
-  --consumer \
-  --topic "prom." \
-  --resource-pattern-type prefixed \
-  --group "flink-agg5m-"
-
-/opt/kafka/bin/kafka-acls.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  --add \
-  --allow-principal User:flink \
-  --producer \
-  --topic "prom." \
-  --resource-pattern-type prefixed
-
-# 查看 ACL
-/opt/kafka/bin/kafka-acls.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  --list
-```
-
----
-
-## 5. Topic 管理与最佳实践
-
-### 5.1 创建 Topic
+### 4.1 创建 Topic
 
 ```bash
 # 原始数据 topic(每城每个 tenant 一个)
 for city in bj sz hf; do
   for tenant in app_business infra; do
-    /opt/kafka/bin/kafka-topics.sh \
-      --bootstrap-server kafka-1:9094 \
-      --command-config /opt/kafka/config/admin-client.properties \
+    /appdata/kafka/bin/kafka-topics.sh \
+      --bootstrap-server kafka-1:9092 \
       --create --topic prom.${city}.raw.${tenant} \
       --partitions 64 \
       --replication-factor 3 \
@@ -544,9 +373,8 @@ done
 # 路由后 topic
 for city in bj sz hf; do
   for biz in core infra data app_business; do
-    /opt/kafka/bin/kafka-topics.sh \
-      --bootstrap-server kafka-1:9094 \
-      --command-config /opt/kafka/config/admin-client.properties \
+    /appdata/kafka/bin/kafka-topics.sh \
+      --bootstrap-server kafka-1:9092 \
       --create --topic prom.${city}.routed.${biz} \
       --partitions 64 \
       --replication-factor 3 \
@@ -556,9 +384,8 @@ done
 
 # DLQ topic(Flink 创建)
 for city in bj sz hf; do
-  /opt/kafka/bin/kafka-topics.sh \
-    --bootstrap-server kafka-1:9094 \
-    --command-config /opt/kafka/config/admin-client.properties \
+  /appdata/kafka/bin/kafka-topics.sh \
+    --bootstrap-server kafka-1:9092 \
     --create --topic prom.${city}.dlq.sr.5m \
     --partitions 12 \
     --replication-factor 3 \
@@ -566,7 +393,7 @@ for city in bj sz hf; do
 done
 ```
 
-### 5.2 Topic 分区数选择
+### 4.2 Topic 分区数选择
 
 | 场景 | partition 数 | 说明 |
 |---|---|---|
@@ -577,7 +404,7 @@ done
 
 > **注意**:partition 数只能增加不能减少。建议初始值保守,后续按需扩。
 
-### 5.3 Topic 配置最佳实践
+### 4.3 Topic 配置最佳实践
 
 | 配置 | 推荐值 | 说明 |
 |---|---|---|
@@ -587,57 +414,52 @@ done
 | `min.insync.replicas` | 2 | 配合 acks=all,2 副本写入成功才算成功 |
 | `unclean.leader.election.enable` | false | 禁止未同步副本成为 leader,防数据丢失 |
 
-### 5.4 Topic 运维命令
+### 4.4 Topic 运维命令
 
 ```bash
 # 列出所有 topic
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --list | grep prom
 
 # 查看 topic 详情
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe --topic prom.sz.raw.app_business
 
 # 增加 partition(只能增,不能减)
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --alter --topic prom.sz.raw.app_business \
   --partitions 128
 
 # 修改 topic 配置
-/opt/kafka/bin/kafka-configs.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-configs.sh \
+  --bootstrap-server kafka-1:9092 \
   --alter --topic prom.sz.raw.app_business \
   --add-config retention.ms=172800000  # 改为 2 天
 
 # 删除 topic(谨慎!)
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --delete --topic prom.sz.dlq.sr.5m
 ```
 
 ---
 
-## 6. 监控部署
+## 5. 监控部署
 
-### 6.1 JMX Exporter
+### 5.1 JMX Exporter
 
 部署 `jmx_prometheus_javaagent` 暴露 Kafka JMX 指标到 Prometheus:
 
 ```bash
 # 下载 JMX exporter
-cd /opt/kafka
+cd /appdata/kafka
 sudo wget https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar
 
 # 创建配置文件
-sudo cat > /opt/kafka/jmx-exporter.yml << 'EOF'
+sudo cat > /appdata/kafka/jmx-exporter.yml << 'EOF'
 lowercaseOutputName: true
 lowercaseOutputLabelNames: true
 rules:
@@ -651,14 +473,14 @@ rules:
     name: java_$1_$2
 EOF
 
-sudo chown kafka:kafka /opt/kafka/jmx-exporter.yml
+sudo chown kafka:kafka /appdata/kafka/jmx-exporter.yml
 ```
 
 修改 systemd 服务,添加 JMX exporter agent:
 
 ```ini
 # /etc/systemd/system/kafka.service 的 [Service] 段追加
-Environment="KAFKA_OPTS=-javaagent:/opt/kafka/jmx_prometheus_javaagent-0.20.0.jar=9404:/opt/kafka/jmx-exporter.yml -Djava.security.auth.login.config=/opt/kafka/config/kafka_server_jaas.conf"
+Environment="KAFKA_OPTS=-javaagent:/appdata/kafka/jmx_prometheus_javaagent-0.20.0.jar=9404:/appdata/kafka/jmx-exporter.yml"
 ```
 
 ```bash
@@ -669,7 +491,7 @@ sudo systemctl restart kafka
 curl -s http://kafka-1:9404/metrics | head -20
 ```
 
-### 6.2 Prometheus 抓取配置
+### 5.2 Prometheus 抓取配置
 
 ```yaml
 # prometheus.yml
@@ -683,7 +505,7 @@ scrape_configs:
     scrape_interval: 15s
 ```
 
-### 6.3 关键监控指标
+### 5.3 关键监控指标
 
 | 指标 | JMX 名称 | 告警阈值 |
 |---|---|---|
@@ -698,17 +520,16 @@ scrape_configs:
 | 磁盘使用率 | `kafka_log_log_size` | > 80% |
 | GC 暂停 | `java_lang_garbagecollector_collectiontime` | > 500ms |
 
-### 6.4 Consumer Lag 监控
+### 5.4 Consumer Lag 监控
 
 ```bash
 # 安装 kafka-exporter(独立组件,监控 consumer group lag)
 docker run -d --name kafka-exporter \
   -p 9308:9308 \
-  -e KAFKA_SERVERS=kafka-1:9094 \
   danielqsj/kafka-exporter:latest \
-  --kafka.server=kafka-1:9094 \
-  --kafka.server=kafka-2:9094 \
-  --kafka.server=kafka-3:9094
+  --kafka.server=kafka-1:9092 \
+  --kafka.server=kafka-2:9092 \
+  --kafka.server=kafka-3:9092
 ```
 
 ```yaml
@@ -750,7 +571,7 @@ groups:
           summary: "Kafka has offline partitions"
 ```
 
-### 6.5 Grafana Dashboard
+### 5.5 Grafana Dashboard
 
 导入 Kafka Dashboard:
 
@@ -762,9 +583,9 @@ groups:
 
 ---
 
-## 7. 性能调优
+## 6. 性能调优
 
-### 7.1 Producer 调优(prom-gw 侧)
+### 6.1 Producer 调优(prom-gw 侧)
 
 prom-gw 已内置优化(见 [internal/kafkasink/producer.go](../../internal/kafkasink/producer.go)):
 
@@ -779,7 +600,7 @@ prom-gw 已内置优化(见 [internal/kafkasink/producer.go](../../internal/kafk
 | `linger.ms` | `50` | 50ms 攒批延迟 |
 | `buffer.memory` | `134217728` | 128MB producer buffer |
 
-### 7.2 Consumer 调优(Flink 侧)
+### 6.2 Consumer 调优(Flink 侧)
 
 | 参数 | 值 | 说明 |
 |---|---|---|
@@ -792,7 +613,7 @@ prom-gw 已内置优化(见 [internal/kafkasink/producer.go](../../internal/kafk
 | `auto.offset.reset` | `latest` | 无 offset 时从最新开始 |
 | `enable.auto.commit` | `false` | 由 Flink checkpoint 管理 offset |
 
-### 7.3 Broker 调优
+### 6.3 Broker 调优
 
 | 参数 | 值 | 说明 |
 |---|---|---|
@@ -807,7 +628,7 @@ prom-gw 已内置优化(见 [internal/kafkasink/producer.go](../../internal/kafk
 
 > **关键**:Kafka 生产环境不建议主动刷盘,依赖操作系统 PageCache 异步刷盘。主动刷盘会导致性能下降 90%+。
 
-### 7.4 磁盘 IO 调优
+### 6.4 磁盘 IO 调优
 
 ```bash
 # 查看磁盘 IO
@@ -830,7 +651,7 @@ echo mq-deadline > /sys/block/sdX/queue/scheduler  # HDD
 blockdev --setra 4096 /dev/sdX    # 2MB read-ahead
 ```
 
-### 7.5 网络调优
+### 6.5 网络调优
 
 ```bash
 # 网卡 ring buffer
@@ -843,87 +664,72 @@ echo "net.core.netdev_max_backlog=5000" >> /etc/sysctl.d/99-kafka.conf
 
 ---
 
-## 8. 运维操作
+## 7. 运维操作
 
-### 8.1 集群状态检查
+### 7.1 集群状态检查
 
 ```bash
 # 1. Broker 列表
-/opt/kafka/bin/kafka-broker-api-versions.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  | grep -oP 'id=\K[0-9]+'
+/appdata/kafka/bin/kafka-broker-api-versions.sh \
+  --bootstrap-server kafka-1:9092 | grep -oP 'id=\K[0-9]+'
 
 # 2. Controller 选举状态
-/opt/kafka/bin/kafka-metadata-quorum.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server kafka-1:9092 \
   describe --status
 
 # 3. Topic 列表
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --list
 
 # 4. Consumer Group 列表
-/opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka-1:9092 \
   --list
 
 # 5. Consumer Group lag
-/opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe --group flink-agg5m-sz-app-business
 ```
 
-### 8.2 消费与生产测试
+### 7.2 消费与生产测试
 
 ```bash
 # 生产测试
-/opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-console-producer.sh \
+  --bootstrap-server kafka-1:9092 \
   --topic prom.sz.raw.app_business
 
 # 消费测试
-/opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server kafka-1:9092 \
   --topic prom.sz.raw.app_business \
   --from-beginning --max-messages 10 --timeout-ms 10000
 
 # 生产性能测试
-/opt/kafka/bin/kafka-producer-perf-test.sh \
-  --producer-props bootstrap.servers=kafka-1:9094 \
-    security.protocol=SASL_SSL \
-    sasl.mechanism=SCRAM-SHA-512 \
-    'sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="Admin@2026";' \
-    ssl.truststore.location=/opt/kafka/ssl/kafka.truststore.jks \
-    ssl.truststore.password=<truststore-password> \
+/appdata/kafka/bin/kafka-producer-perf-test.sh \
+  --producer-props bootstrap.servers=kafka-1:9092 \
   --topic prom.sz.raw.app_business \
   --num-records 100000 \
   --record-size 1024 \
   --throughput 50000
 
 # 消费性能测试
-/opt/kafka/bin/kafka-consumer-perf-test.sh \
-  --bootstrap-server kafka-1:9094 \
-  --consumer.config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-consumer-perf-test.sh \
+  --bootstrap-server kafka-1:9092 \
   --topic prom.sz.raw.app_business \
   --messages 100000 \
   --threads 4
 ```
 
-### 8.3 优雅停机
+### 7.3 优雅停机
 
 ```bash
 # 1. 检查该 Broker 是否为 Controller
-/opt/kafka/bin/kafka-metadata-quorum.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server kafka-1:9092 \
   describe --status | grep Leader
 
 # 2. 如果是 Controller,先迁移 Controller(可选)
@@ -933,37 +739,36 @@ echo "net.core.netdev_max_backlog=5000" >> /etc/sysctl.d/99-kafka.conf
 sudo systemctl stop kafka
 
 # 4. 验证副本同步
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe | grep -v "UnderReplicated"
 ```
 
-### 8.4 日志管理
+### 7.4 日志管理
 
 ```bash
 # Kafka 日志位置
-ls /var/log/kafka/
+ls /applog/kafka/
 # server.log    → 主日志
 # state-change.log → 状态变更日志
 # controller.log   → Controller 日志
 
-# 日志轮转配置(/opt/kafka/config/log4j.properties)
+# 日志轮转配置(/appdata/kafka/config/log4j.properties)
 log4j.appender.kafkaAppender.maxFileSize=100MB
 log4j.appender.kafkaAppender.maxBackupIndex=10
 
 # 查看错误日志
-grep -i "error\|warn\|fatal" /var/log/kafka/server.log | tail -50
+grep -i "error\|warn\|fatal" /applog/kafka/server.log | tail -50
 ```
 
 ---
 
-## 9. 扩容与缩容
+## 8. 扩容与缩容
 
-### 9.1 扩容(增加 Broker)
+### 8.1 扩容(增加 Broker)
 
 ```bash
-# 1. 部署新 Broker(按 §2-§4 步骤)
+# 1. 部署新 Broker(按 §2-§3 步骤)
 # 假设新增 kafka-4 (10.0.1.24),node.id=4, rack=az-2
 
 # 2. 更新 controller.quorum.voters(所有 Broker)
@@ -975,45 +780,40 @@ for broker in kafka-1 kafka-2 kafka-3 kafka-4; do
     ssh ${broker} "sudo systemctl restart kafka"
     sleep 10
     # 等待 Broker 恢复
-    /opt/kafka/bin/kafka-broker-api-versions.sh \
-        --bootstrap-server ${broker}:9094 \
-        --command-config /opt/kafka/config/admin-client.properties | head -1
+    /appdata/kafka/bin/kafka-broker-api-versions.sh \
+        --bootstrap-server ${broker}:9092 | head -1
 done
 
 # 4. 迁移 partition 副本到新 Broker(使用 kafka-reassign-partitions)
 # 生成迁移方案
-/opt/kafka/bin/kafka-reassign-partitions.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-reassign-partitions.sh \
+  --bootstrap-server kafka-1:9092 \
   --topics-to-move-json-file topics-to-move.json \
   --broker-list "1,2,3,4" \
   --generate
 
 # 执行迁移
-/opt/kafka/bin/kafka-reassign-partitions.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-reassign-partitions.sh \
+  --bootstrap-server kafka-1:9092 \
   --reassignment-json-file reassignment.json \
   --execute
 
 # 验证迁移完成
-/opt/kafka/bin/kafka-reassign-partitions.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-reassign-partitions.sh \
+  --bootstrap-server kafka-1:9092 \
   --reassignment-json-file reassignment.json \
   --verify
 ```
 
-### 9.2 缩容(移除 Broker)
+### 8.2 缩容(移除 Broker)
 
 ```bash
 # 1. 先将待移除 Broker 上的 partition 迁移到其他 Broker
 #   kafka-reassign-partitions --broker-list "1,2,3"(排除待移除的 4)
 
 # 2. 确认待移除 Broker 上无 partition
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe | grep "Broker: 4"
 # 期望: 无输出(该 Broker 上无 partition)
 
@@ -1026,9 +826,9 @@ ssh kafka-4 "sudo systemctl stop kafka"
 
 ---
 
-## 10. 备份与恢复
+## 9. 备份与恢复
 
-### 10.1 数据备份策略
+### 9.1 数据备份策略
 
 | 方案 | 工具 | 频率 | 适用场景 |
 |---|---|---|---|
@@ -1036,55 +836,45 @@ ssh kafka-4 "sudo systemctl stop kafka"
 | 快照备份 | kafka-export-snapshot | 按需 | 临时备份 |
 | 配置备份 | git + 文件同步 | 每次变更 | 配置版本管理 |
 
-### 10.2 配置备份
+### 9.2 配置备份
 
 ```bash
 # 定期备份 Kafka 配置(建议纳入 Git)
 tar -czf kafka-config-backup-$(date +%Y%m%d).tar.gz \
-    /opt/kafka/config/server.properties \
-    /opt/kafka/config/kafka_server_jaas.conf \
-    /opt/kafka/config/admin-client.properties \
-    /opt/kafka/jmx-exporter.yml
+    /appdata/kafka/config/server.properties \
+    /appdata/kafka/jmx-exporter.yml
 
 # 备份 Topic 列表与配置
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe > topic-backup-$(date +%Y%m%d).txt
 ```
 
-### 10.3 MirrorMaker2 跨机房复制
+### 9.3 MirrorMaker2 跨机房复制
 
 ```bash
 # mm2.properties(在灾备机房执行)
 clusters = primary, dr
-primary.bootstrap.servers = kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094
-dr.bootstrap.servers = kafka-1.dr:9094,kafka-2.dr:9094,kafka-3.dr:9094
+primary.bootstrap.servers = kafka-1.sz:9092,kafka-2.sz:9092,kafka-3.sz:9092
+dr.bootstrap.servers = kafka-1.dr:9092,kafka-2.dr:9092,kafka-3.dr:9092
 
 # 复制 prom-gw 相关 topic
 primary->dr.enabled = true
 primary->dr.topics = prom\..*
 primary->dr.groups = prom-gw.*|flink-agg5m.*
 
-# 安全配置
-primary.security.protocol = SASL_SSL
-primary.sasl.mechanism = SCRAM-SHA-512
-primary.sasl.jaas.config = org.apache.kafka.common.security.scram.ScramLoginModule required username="admin" password="Admin@2026";
-primary.ssl.truststore.location = /opt/kafka/ssl/kafka.truststore.jks
-primary.ssl.truststore.password = <password>
-
 # 同步设置
 sync.topic.configs.enabled = true
-sync.topic.acls.enabled = true
+sync.topic.acls.enabled = false                    # 未启用 ACL,不同步
 replication.factor = 3
 checkpoints.topic.replication.factor = 3
 heartbeats.topic.replication.factor = 3
 
 # 启动 MirrorMaker2
-/opt/kafka/bin/connect-mirror-maker.sh mm2.properties
+/appdata/kafka/bin/connect-mirror-maker.sh mm2.properties
 ```
 
-### 10.4 数据恢复
+### 9.4 数据恢复
 
 ```bash
 # 从 MirrorMaker2 备份恢复(灾备机房 → 主机房)
@@ -1098,21 +888,18 @@ sudo systemctl restart kafka
 
 ---
 
-## 11. 灾难恢复
+## 10. 灾难恢复
 
-### 11.1 单 Broker 故障
+### 10.1 单 Broker 故障
 
 ```bash
 # 1. 确认 Broker 宕机
-/opt/kafka/bin/kafka-broker-api-versions.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
-  | grep -c "id="   # 期望: 3(如果只有 2,说明有 Broker 宕机)
+/appdata/kafka/bin/kafka-broker-api-versions.sh \
+  --bootstrap-server kafka-1:9092 | grep -c "id="   # 期望: 3(如果只有 2,说明有 Broker 宕机)
 
 # 2. 检查 under-replicated partitions
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe | grep "UnderReplicated"
 
 # 3. 自动恢复:Kafka 会自动在其他 Broker 上重建副本
@@ -1123,7 +910,7 @@ sudo systemctl restart kafka
 #    b. 或使用 kafka-reassign-partitions 将副本迁移到其他 Broker
 ```
 
-### 11.2 全集群故障
+### 10.2 全集群故障
 
 ```bash
 # 1. 确认所有 Broker 宕机
@@ -1140,112 +927,118 @@ for broker in kafka-1 kafka-2 kafka-3; do
 done
 
 # 3. 等待 Controller 选举完成
-/opt/kafka/bin/kafka-metadata-quorum.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-metadata-quorum.sh \
+  --bootstrap-server kafka-1:9092 \
   describe --status
 
 # 4. 验证所有 partition 恢复
-/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe | grep "UnderReplicated"
 # 期望: 无输出
 
 # 5. prom-gw 会自动从 WAL 降级恢复,无需人工干预
 ```
 
-### 11.3 数据损坏恢复
+### 10.3 数据损坏恢复
 
 ```bash
 # 1. 定位损坏的 log directory
-grep -i "corrupt\|error" /var/log/kafka/server.log
+grep -i "corrupt\|error" /applog/kafka/server.log
 
 # 2. 停止对应 Broker
 sudo systemctl stop kafka
 
 # 3. 删除损坏的 log directory(该 Broker 上的数据会从其他副本同步)
-sudo rm -rf /data/kafka/log-5/*
+sudo rm -rf /data06/kafka/*
 # 注意:只删除损坏的目录,不要删除全部
 
 # 4. 重新启动 Broker,Kafka 会自动从其他副本同步数据
 sudo systemctl start kafka
 
 # 5. 监控同步进度
-watch -n 5 '/opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server kafka-1:9094 \
-  --command-config /opt/kafka/config/admin-client.properties \
+watch -n 5 '/appdata/kafka/bin/kafka-topics.sh \
+  --bootstrap-server kafka-1:9092 \
   --describe | grep "UnderReplicated"'
 ```
 
 ---
 
-## 12. 附录
+## 11. 附录
 
-### 12.1 配置文件清单
+### 11.1 配置文件清单
 
 | 文件 | 位置 | 用途 |
 |---|---|---|
-| `server.properties` | `/opt/kafka/config/server.properties` | Broker 主配置 |
-| `kafka_server_jaas.conf` | `/opt/kafka/config/kafka_server_jaas.conf` | Broker SASL 配置 |
-| `admin-client.properties` | `/opt/kafka/config/admin-client.properties` | 管理客户端配置 |
-| `jmx-exporter.yml` | `/opt/kafka/jmx-exporter.yml` | JMX exporter 配置 |
+| `server.properties` | `/appdata/kafka/config/server.properties` | Broker 主配置(PLAINTEXT) |
+| `jmx-exporter.yml` | `/appdata/kafka/jmx-exporter.yml` | JMX exporter 配置 |
 | `kafka.service` | `/etc/systemd/system/kafka.service` | systemd 服务 |
-| `kafka.keystore.jks` | `/opt/kafka/ssl/kafka.keystore.jks` | Broker SSL 密钥库 |
-| `kafka.truststore.jks` | `/opt/kafka/ssl/kafka.truststore.jks` | SSL 信任库 |
 | `99-kafka.conf` | `/etc/sysctl.d/99-kafka.conf` | 内核参数 |
 | `kafka.conf` | `/etc/security/limits.d/kafka.conf` | 文件句柄限制 |
 
-### 12.2 常用命令速查
+> **与启用认证的部署相比,本配置不包含以下文件**:
+> - `kafka_server_jaas.conf`(SASL JAAS 配置)
+> - `admin-client.properties`(管理客户端认证配置)
+> - `kafka.keystore.jks` / `kafka.truststore.jks`(SSL 证书库)
+
+### 11.2 常用命令速查
 
 ```bash
 # 集群管理
-/opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties describe --status
-/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties
+/appdata/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server kafka-1:9092 describe --status
+/appdata/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka-1:9092
 
 # Topic 管理
-/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --list
-/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --describe --topic <topic>
-/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --alter --topic <topic> --partitions 128
+/appdata/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --list
+/appdata/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --topic <topic>
+/appdata/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092 --alter --topic <topic> --partitions 128
 
 # Consumer Group
-/opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --list
-/opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --describe --group <group>
+/appdata/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 --list
+/appdata/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 --describe --group <group>
 
-# ACL 管理
-/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --list
-/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --add --allow-principal User:prom-gw --producer --topic "prom." --resource-pattern-type prefixed
-
-# SCRAM 用户
-/opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --alter --add-config 'SCRAM-SHA-512=[password=xxx]' --entity-type users --entity-name <user>
-/opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --describe --entity-type users
+# Topic 配置修改
+/appdata/kafka/bin/kafka-configs.sh --bootstrap-server kafka-1:9092 --alter --topic <topic> --add-config retention.ms=172800000
 
 # 性能测试
-/opt/kafka/bin/kafka-producer-perf-test.sh --topic <topic> --num-records 100000 --record-size 1024 --throughput 50000 --producer-props bootstrap.servers=kafka-1:9094 ...
-/opt/kafka/bin/kafka-consumer-perf-test.sh --bootstrap-server kafka-1:9094 --topic <topic> --messages 100000
+/appdata/kafka/bin/kafka-producer-perf-test.sh --topic <topic> --num-records 100000 --record-size 1024 --throughput 50000 --producer-props bootstrap.servers=kafka-1:9092
+/appdata/kafka/bin/kafka-consumer-perf-test.sh --bootstrap-server kafka-1:9092 --topic <topic> --messages 100000
 
 # 副本迁移
-/opt/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --topics-to-move-json-file topics.json --broker-list "1,2,3" --generate
-/opt/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --reassignment-json-file plan.json --execute
-/opt/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9094 --command-config /opt/kafka/config/admin-client.properties --reassignment-json-file plan.json --verify
+/appdata/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9092 --topics-to-move-json-file topics.json --broker-list "1,2,3" --generate
+/appdata/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9092 --reassignment-json-file plan.json --execute
+/appdata/kafka/bin/kafka-reassign-partitions.sh --bootstrap-server kafka-1:9092 --reassignment-json-file plan.json --verify
 ```
 
-### 12.3 故障排查速查
+### 11.3 故障排查速查
 
 | 现象 | 排查 | 解决 |
 |---|---|---|
-| Broker 无法启动 | 检查 `/data/kafka/log-0/meta.properties` 的 cluster.id 是否匹配 | 重新格式化或恢复 cluster.id |
-| Client 连接超时 | 检查 `advertised.listeners` 是否可达 | 修正 `advertised.listeners` |
-| SASL 认证失败 | 检查 JAAS 配置和 SCRAM 用户 | 重新创建用户 |
-| SSL 握手失败 | 检查 truststore 和证书有效期 | 更新证书 |
+| Broker 无法启动 | 检查 `/data01/kafka/meta.properties` 的 cluster.id 是否匹配 | 重新格式化或恢复 cluster.id |
+| Client 连接超时 | 检查 `advertised.listeners` 是否可达;检查安全组是否放行 9092 | 修正 `advertised.listeners` / 安全组规则 |
+| 连接被拒绝 | 检查 Broker 是否启动;检查 9092 端口是否监听 | 启动 Broker / 检查 listeners 配置 |
 | Under-replicated partitions | 检查 Broker 状态和磁盘 IO | 恢复 Broker 或扩容 |
 | Consumer lag 持续增大 | 检查 Flink 消费速率 | 扩 partition / 扩 TM |
 | 磁盘满 | 检查 retention 配置 | 调整 retention 或扩容 |
 | Controller 选举失败 | 检查 Quorum 是否有 2/3 存活 | 恢复 Broker |
 
-### 12.4 相关文档
+### 11.4 安全替代方案说明
+
+本部署**不启用 Kafka 自身的 SSL/SASL/ACL 认证**,通过以下方式保证安全:
+
+| 安全层 | 措施 | 说明 |
+|---|---|---|
+| 网络隔离 | VPC + 安全组 | Kafka 9092 端口仅对 prom-gw / Flink 网段开放 |
+| 主机访问控制 | SSH key +堡垒机 | 限制可直接访问 Kafka 主机的人员 |
+| 监控审计 | JMX + 日志审计 | 监控异常连接和操作 |
+| 数据隔离 | Topic 命名规范 | 按 `prom.<city>.<stage>.<tenant>` 隔离不同业务数据 |
+
+> **如需启用认证**,可参考 Kafka 官方文档添加 SASL/SSL 配置,本工程的 prom-gw 和 Flink 客户端已预留环境变量/参数接入点(见 [prom-gw 配置参考](configuration-reference.md) 和 [Flink 生产部署](flink-production-deployment.md))。
+
+### 11.5 相关文档
 
 - [生产部署指南](production-guide.md) — Kafka 基础安装(§3)、prom-gw 部署(§5)、LVS(§6)
+- [Kafbat UI 部署](kafka-ui-deployment.md) — Kafka Web 监控管理界面(Kafbat UI v1.5.0)
 - [Flink 生产部署](flink-production-deployment.md) — Flink 集群部署与作业管理
 - [高可用与负载均衡](ha-lb-deployment.md) — Nginx/Keepalived 部署
 - [压力测试指南](stress-test-guide.md) — Kafka 端到端压测(§7.1)
