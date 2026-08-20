@@ -7,7 +7,7 @@
 #     --wal-dir=/tmp/prom-gw-local-wal \
 #     --source-dc=dc-local-dev
 #
-# 前置:先创建 topic(参考 docs/operations/local-dev-guide.md §3.7)
+# 前置:先创建 topic(参考 docs/operations/prom-gw-operations-guide.md §10)
 #   prom.local.raw.app_business / prom.local.raw.infra
 #   prom.local.routed.core / prom.local.routed.infra / prom.local.routed.data / prom.local.routed.app_business
 # ----------------------------------------------------------------------------

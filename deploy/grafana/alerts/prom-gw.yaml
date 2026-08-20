@@ -33,7 +33,7 @@ groups:
           description: |
             当前错误率 {{ $value | humanizePercentage }} > 1%。
             检查 gateway_errors_total{stage,type} 看哪类错误突增。
-          runbook: "docs/operations/runbook.md#high-error-rate"
+          runbook: "docs/operations/prom-gw-operations-guide.md"
 
       - alert: PromGwRequestErrors
         expr: |

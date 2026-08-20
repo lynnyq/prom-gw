@@ -14,7 +14,7 @@ mvn clean package
 
 ### 2. 本地运行
 
-前置:已按 [local-dev-guide.md](../../docs/operations/local-dev-guide.md) 启动 Kafka + prom-gw + Prometheus,Kafka 中已有数据。
+前置:已按 [prom-gw-operations-guide.md](../../docs/operations/prom-gw-operations-guide.md) 启动 Kafka + prom-gw + Prometheus,Kafka 中已有数据。
 
 ```bash
 java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
@@ -127,7 +127,7 @@ jar tf target/flink-agg5m-starrocks-1.0.0.jar | grep PromProtos | head -5
 
 ### 步骤 4:本地启动 Flink 作业消费 Kafka
 
-前置:已按 [local-dev-guide.md](../../docs/operations/local-dev-guide.md) 完成:
+前置:已按 [prom-gw-operations-guide.md](../../docs/operations/prom-gw-operations-guide.md) 完成:
 1. Kafka(KRaft 模式)已启动,`config/local.properties` 配置正确
 2. prom-gw 已启动,topic 自动创建:
    - `prom.local.raw.app_business`
@@ -166,7 +166,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 #### 5.2 查看 StarRocks 数据落库
 
 ```sql
--- 1) 确认表存在(DDL 见 docs/operations/flink-consumer-guide.md)
+-- 1) 确认表存在(DDL 见 docs/operations/prom-gw-operations-guide.md §6)
 SHOW CREATE TABLE prom.metrics_5m;
 
 -- 2) 查询最近 10 分钟的聚合结果
@@ -285,7 +285,7 @@ payload 是 Prometheus 原始字节,不含租户信息。tenant/source_dc/ingest
 
 ## 参数
 
-完整参数见 [configuration-reference.md](../../docs/operations/configuration-reference.md),常用:
+完整参数见 [prom-gw-operations-guide.md](../../docs/operations/prom-gw-operations-guide.md) §9,常用:
 
 | 参数 | 说明 | 默认 |
 |---|---|---|
@@ -300,6 +300,6 @@ payload 是 Prometheus 原始字节,不含租户信息。tenant/source_dc/ingest
 
 ## 相关文档
 
-- [Flink 消费 Kafka 写 StarRocks 开发指南](../../docs/operations/flink-consumer-guide.md)
-- [prom-gw 参数与配置完整说明](../../docs/operations/configuration-reference.md)
-- [本地开发部署指南](../../docs/operations/local-dev-guide.md)
+- [Flink 消费 Kafka 写 StarRocks 开发指南](../../docs/operations/prom-gw-operations-guide.md)
+- [prom-gw 参数与配置完整说明](../../docs/operations/prom-gw-operations-guide.md)
+- [本地开发部署指南](../../docs/operations/prom-gw-operations-guide.md)

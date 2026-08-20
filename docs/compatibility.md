@@ -7,7 +7,7 @@
 
 | 客户端 | 版本范围 | wire format | 验证方式 | 状态 |
 |---|---|---|---|---|
-| **Prometheus server** | v2.40 / v2.45 / v2.50 / latest | prompb v1 | 单元 + Docker | ✅ |
+| **Prometheus server** | v2.36 / v2.40 / v2.45 / v2.50 / latest | prompb v1 | 单元 + Docker | ✅ |
 | **Cortex distributor** | 任意(走 prompb) | prompb v1 | 单元 | ✅ |
 | **Thanos receiver** | v0.30+ | prompb v1 | 单元 | ✅ |
 | **VictoriaMetrics vmagent** | latest | prompb v1 | 单元 | ✅ |
@@ -22,6 +22,7 @@
 
 | 客户端 | 已知差异 | 我们的处理 |
 |---|---|---|
+| Prometheus v2.36 | baseline 版本,remote_write 已稳定 | v1 parser 正常处理,无特殊处理 |
 | Prometheus v2.40 | 原生 histogram 实验性引入(默认关闭) | v1 parser 忽略 histogram 字段,只取 sample |
 | Prometheus v2.45+ | exemplars 默认开启 | v1 不读 exemplar 字段,无影响 |
 | Prometheus v2.50+ | remote_write 默认开启 retry | retry 在客户端完成,GW 无感 |
@@ -35,7 +36,7 @@
 
 | 客户端 / 场景 | 不兼容原因 | 建议 |
 |---|---|---|
-| Prometheus **<= v2.30** | proto 字段定义不同(Timestamp 编码) | 升级 Prometheus 到 v2.40+ |
+| Prometheus **<= v2.30** | proto 字段定义不同(Timestamp 编码) | 升级 Prometheus 到 v2.36+ |
 | **InfluxDB v2** line protocol | 协议不兼容 | 走 InfluxDB → Prometheus exporter |
 | **Graphite** plaintext | 协议不兼容 | 走 graphite_exporter → prom |
 | **StatsD** | 协议不兼容 | 走 statsd_exporter → prom |

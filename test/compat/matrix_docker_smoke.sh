@@ -4,13 +4,22 @@
 # 目标:验证 prom-gw 兼容 Prometheus 多个版本 + Cortex + VM agent 的 remote_write 协议。
 #
 # 用法:
-#   bash test/compat/matrix_docker_smoke.sh                          # 默认 4 套镜像
+#   bash test/compat/matrix_docker_smoke.sh                          # 默认镜像矩阵
 #   PROM_IMAGES="prom/prometheus:v2.40.0" bash test/compat/matrix_docker_smoke.sh  # 自定义
 #
 # 前置:
 #   - docker 可用
 #   - prom-gw 已构建到 bin/prom-gw(或设置 PROM_GW_BIN 环境变量)
-#   - 当前主机有空闲的 :19201 端口(remote_write 接入)
+#   - 当前主机有空闲的 :19201 端口(remote_write 接入)和 :9090 端口(prometheus)
+#
+# 环境变量:
+#   PROM_GW_BIN          prom-gw 二进制路径(默认 ./bin/prom-gw)
+#   GW_PORT              prom-gw remote_write 端口(默认 19201)
+#   WAL_DISK_USED_RATIO  WAL 磁盘使用率阈值(默认 0.95,冒烟测试用)
+#
+# 平台支持:
+#   - Linux  : --network host,容器通过 127.0.0.1 访问宿主机
+#   - macOS  : Docker Desktop 桥接网络 + host.docker.internal,容器通过宿主机端口映射访问
 #
 # 每个镜像跑:
 #   1. 用 docker run 启动该客户端
@@ -24,12 +33,24 @@ set -euo pipefail
 
 PROM_GW_BIN=${PROM_GW_BIN:-./bin/prom-gw}
 GW_PORT=${GW_PORT:-19201}
+WAL_DISK_USED_RATIO=${WAL_DISK_USED_RATIO:-0.95}
 GW_BIN_DIR=$(mktemp -d -t prom-gw-smoke.XXXXXX)
 GW_LOG=$GW_BIN_DIR/prom-gw.log
 GW_PID_FILE=$GW_BIN_DIR/prom-gw.pid
 
+# 平台检测:macOS Docker Desktop 不支持 --network host,需用桥接 + host.docker.internal
+OS_TYPE=$(uname -s)
+if [[ "$OS_TYPE" == "Darwin" ]]; then
+  HOST_GW="host.docker.internal"
+  DOCKER_NET_OPTS=(-p 9090:9090)
+else
+  HOST_GW="127.0.0.1"
+  DOCKER_NET_OPTS=(--network host)
+fi
+
 # 默认镜像矩阵
 DEFAULT_IMAGES=(
+  "prom/prometheus:v2.36.1"
   "prom/prometheus:v2.40.8"
   "prom/prometheus:v2.45.6"
   "prom/prometheus:v2.50.1"
@@ -77,7 +98,7 @@ if [[ ! -x "$PROM_GW_BIN" ]]; then
 fi
 
 # 1. 启动 prom-gw(WAL-only 模式,不依赖 Kafka,直接落盘)
-echo "==> 启动 prom-gw(:$GW_PORT, WAL-only 模式)"
+echo "==> 启动 prom-gw(:$GW_PORT, WAL-only 模式, wal-disk-used-ratio=$WAL_DISK_USED_RATIO)"
 PROM_GW_WAL_DIR=$GW_BIN_DIR/wal
 mkdir -p "$PROM_GW_WAL_DIR"
 
@@ -103,6 +124,7 @@ EOF
   --config="$GW_BIN_DIR/rules.yaml" \
   --tokens="$GW_BIN_DIR/tokens.yaml" \
   --wal-dir="$PROM_GW_WAL_DIR" \
+  --wal-disk-used-ratio="$WAL_DISK_USED_RATIO" \
   --write-addr=":$GW_PORT" \
   --metrics-addr=":18080" \
   --admin-addr=":18082" \
@@ -126,39 +148,35 @@ for i in {1..30}; do
 done
 
 # 记录启动时的 samples_total 基准
+# 注意:awk 模式需匹配任意 label 顺序(Prometheus 按 label 名字母序输出)
 BASELINE=$(curl -fsS "http://127.0.0.1:18080/metrics" \
-  | awk '/^gateway_samples_total\{stage="parse",status="ok"\}/ {print $2}' \
-  | head -1)
+  | awk '/^gateway_samples_total\{/ && /stage="parse"/ && /status="ok"/ {print $2; exit}')
 BASELINE=${BASELINE:-0}
-echo "==> 启动 OK,baseline samples_total=$BASELINE"
+echo "==> 启动 OK,baseline samples_total=$BASELINE (platform=$OS_TYPE, host_gw=$HOST_GW)"
 
 PASS=0
 FAIL=0
 SKIP=0
 
-run_image() {
+# ensure_image 确保镜像可用:本地有则跳过,本地无则拉取
+# 避免镜像源不可达时,本地已有镜像仍被误判为 SKIP
+ensure_image() {
   local image=$1
-  echo ""
-  echo "==> 镜像: $image"
-
-  # 拉镜像(失败可跳过)
-  if ! docker pull "$image" >/dev/null 2>&1; then
-    echo "  SKIP: pull 失败"
-    SKIP=$((SKIP + 1))
+  if docker image inspect "$image" >/dev/null 2>&1; then
     return 0
   fi
+  docker pull "$image" >/dev/null 2>&1
+}
 
-  local cid
-  cid=$(docker run -d --rm \
-    --label prom-gw-smoke=true \
-    --network host \
-    "$image" \
-    sh -c "cat > /tmp/prometheus.yml <<YML
+# generate_prom_config 生成 prometheus.yml,remote_write 指向宿主机 prom-gw
+generate_prom_config() {
+  local config_file=$1
+  cat > "$config_file" <<EOF
 global:
   scrape_interval: 1s
   evaluation_interval: 1s
 remote_write:
-  - url: http://127.0.0.1:$GW_PORT/api/v1/write
+  - url: http://$HOST_GW:$GW_PORT/api/v1/write
     authorization:
       type: Bearer
       credentials: tk_smoke
@@ -170,20 +188,42 @@ scrape_configs:
   - job_name: self
     static_configs:
       - targets: ['127.0.0.1:9090']
-YML
-exec prometheus --config.file=/tmp/prometheus.yml --web.listen-address=:9090 --storage.tsdb.path=/tmp/data 2>&1" \
-  2>/dev/null) || true
+EOF
+}
 
-  if [[ -z "$cid" ]]; then
-    # Cortex/VM agent 不是 prometheus 二进制,改走 --entrypoint
-    cid=$(docker run -d --rm \
-      --label prom-gw-smoke=true \
-      --network host \
-      --entrypoint sh \
-      "$image" \
-      -c "echo '$image is not a Prometheus binary, running simplified check'; sleep 30" \
-    2>/dev/null) || cid=""
+run_image() {
+  local image=$1
+  echo ""
+  echo "==> 镜像: $image"
+
+  # 确保镜像可用:本地已有则跳过拉取,避免镜像源不可达时误 SKIP
+  if ! ensure_image "$image"; then
+    echo "  SKIP: 镜像不可用(本地无缓存且 pull 失败)"
+    SKIP=$((SKIP + 1))
+    return 0
   fi
+
+  # 判断是否为 Prometheus 官方镜像(cortex-tools / vmagent 不是 prometheus 二进制)
+  if [[ "$image" != prom/prometheus:* ]]; then
+    echo "  SKIP: 非 Prometheus 官方镜像,走单元测试覆盖"
+    SKIP=$((SKIP + 1))
+    return 0
+  fi
+
+  # 生成 prometheus 配置文件(挂载进容器,避免 heredoc 转义问题)
+  local prom_config="$GW_BIN_DIR/prometheus-$(echo "$image" | tr '/:' '__').yml"
+  generate_prom_config "$prom_config"
+
+  local cid
+  cid=$(docker run -d --rm \
+    --label prom-gw-smoke=true \
+    "${DOCKER_NET_OPTS[@]}" \
+    -v "$prom_config:/etc/prometheus/prometheus.yml:ro" \
+    "$image" \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --web.listen-address=:9090 \
+    --storage.tsdb.path=/tmp/data \
+    2>/dev/null) || true
 
   if [[ -z "$cid" ]]; then
     echo "  SKIP: 容器启动失败"
@@ -191,19 +231,36 @@ exec prometheus --config.file=/tmp/prometheus.yml --web.listen-address=:9090 --s
     return 0
   fi
 
-  # 等 30s 采集
+  # 等待 prometheus 就绪(最多 15s)
+  local ready=false
+  for i in {1..30}; do
+    if curl -fsS -m 1 "http://127.0.0.1:9090/-/healthy" >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 0.5
+  done
+
+  if [[ "$ready" != "true" ]]; then
+    echo "  FAIL: prometheus 启动超时"
+    docker logs --tail 10 "$cid" 2>&1 | sed 's/^/    /'
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+    FAIL=$((FAIL + 1))
+    return 0
+  fi
+
+  # 等 30s 采集 + remote_write
   sleep 30
 
-  # 检查 samples_total 是否增长
+  # 检查 samples_total 是否增长(awk 模式匹配任意 label 顺序)
   local current
   current=$(curl -fsS "http://127.0.0.1:18080/metrics" \
-    | awk '/^gateway_samples_total\{stage="parse",status="ok"\}/ {print $2}' \
-    | head -1)
+    | awk '/^gateway_samples_total\{/ && /stage="parse"/ && /status="ok"/ {print $2; exit}')
   current=${current:-0}
 
   local errors
   errors=$(curl -fsS "http://127.0.0.1:18080/metrics" \
-    | awk '/^gateway_errors_total/ {sum += $2} END {print sum+0}')
+    | awk '/^gateway_errors_total\{/ {sum += $2} END {print sum+0}')
 
   # 清理容器
   docker kill "$cid" >/dev/null 2>&1 || true

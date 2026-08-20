@@ -23,7 +23,7 @@
 - **文档**:
   - 设计 `docs/superpowers/specs/2026-07-28-prometheus-multidc-remotewrite-gateway-design.md`
   - 实施计划 `docs/superpowers/plans/2026-07-28-prometheus-multidc-remotewrite-gateway-plan.md`
-  - 运维 `docs/operations/{deploy,runbook,troubleshooting,slo}.md`
+  - 运维 `docs/operations/prom-gw-operations-guide.md`(合并自 deploy/runbook/troubleshooting/slo/production-guide 等全部运维文档)
   - 用户 `docs/user/{quickstart,ruleset-reference,auth}.md` + `docs/user/examples/{deadvalue,downsample,redact-sensitive,route-by-team}.md`
   - API `docs/api/openapi.yaml` + 渲染 `docs/api/index.html`
   - 兼容 `docs/compatibility.md`
