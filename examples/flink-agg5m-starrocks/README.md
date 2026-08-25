@@ -83,10 +83,12 @@ mvn test
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.JobConfigTest
 [INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.sink.StarRocksStreamLoadClientTest
+[INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.Agg5mJobOffsetsTest
 [INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Results:
-[INFO] Tests run: 40, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 46, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -97,6 +99,7 @@ mvn test
 | `MetricAggFunctionTest` | 4 | 5min 窗口聚合 sum/count/max/min/avg/p50/p99 |
 | `PromWriteRequestDecoderTest` | 6 | snappy 解压 + protobuf 解码 + 样本提取 |
 | `JobConfigTest` | 8 | Kafka offset 参数解析与默认值 |
+| `StarRocksStreamLoadClientTest` | 6 | 307 重定向跟随、body/header 转发、循环保护 |
 | `Agg5mJobOffsetsTest` | 15 | 起始位点策略构建、非法取值与 timestamp 校验 |
 
 ### 步骤 3:打包验证
