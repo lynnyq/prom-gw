@@ -146,22 +146,26 @@ func run() error {
 	)
 	brokers := os.Getenv("KAFKA_BROKERS")
 	if brokers != "" {
+		// KAFKA_BROKERS 可能是逗号分隔的多 broker 列表(如 "kafka-1:9092,kafka-2:9092"),
+		// 必须拆分成 []string,否则 franz-go 会把整个字符串当作单个 broker 地址,
+		// 导致 DNS 解析失败 → Ping 超时 → 降级到 WAL-only 模式。
+		brokerList := splitAndTrim(brokers, ",")
 		p, err := kafkasink.New(kafkasink.Config{
-			Brokers:       []string{brokers},
-			Logger:        logger.Named("kafkasink"),
-			BlockTimeout:  100 * time.Millisecond,
+			Brokers:        brokerList,
+			Logger:         logger.Named("kafkasink"),
+			BlockTimeout:   100 * time.Millisecond,
 			ConnectTimeout: 5 * time.Second,
-			Compression:   "zstd",
-			Idempotent:    true,
+			Compression:    "zstd",
+			Idempotent:     true,
 		})
 		if err != nil {
 			logger.Warn("kafka connect failed, will run in WAL-only mode",
-				zap.String("brokers", brokers),
+				zap.Strings("brokers", brokerList),
 				zap.Error(err),
 			)
 		} else {
 			kafkaProducer = p
-			logger.Info("kafkasink connected", zap.String("brokers", brokers))
+			logger.Info("kafkasink connected", zap.Strings("brokers", brokerList))
 		}
 	} else {
 		logger.Info("KAFKA_BROKERS not set, will run in WAL-only mode")
