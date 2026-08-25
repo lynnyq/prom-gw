@@ -98,7 +98,7 @@ DC-C Prometheus ─┘                        └─> Kafka SZ ─> Flink SZ ─
 | Prom → LVS | 10G 同城 LAN | < 1ms | `remote_write` 到 LVS VIP |
 | LVS → prom-gw | 10G 内网 | < 1ms | DR 模式直接转发 |
 | prom-gw → Kafka | 10G 内网 | < 1ms | Kafka `advertised.listeners` 绑内网 |
-| Flink → StarRocks | 走 HTTP 8070 Stream Load | — | FE VIP 负载均衡 |
+| Flink → StarRocks | 走 HTTP 8030 Stream Load(FE `http_port`) | — | FE VIP 负载均衡 |
 | 深圳 ⇄ 北京专线 | 1G×2(主备) | P95 ≤ 30ms | 跨城仅传 5min 聚合 |
 | 合肥 ⇄ 北京专线 | 1G×1 | P95 ≤ 25ms | 故障时降级本地 ClickHouse |
 
@@ -4286,7 +4286,7 @@ sudo logrotate -d /etc/logrotate.d/kafbat-ui   # 测试(dry-run)
 │ 4 slot             4 slot             4 slot             │
 │                                                          │
 │  消费 → Kafka (本城 9094)                                 │
-│  写入 → StarRocks (北京 FE VIP:8070)    ──跨城专线──→    │
+│  写入 → StarRocks (北京 FE VIP:8030)    ──跨城专线──→    │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -4631,6 +4631,13 @@ web.submit.enable: true
 web.cancel.enable: true
 rest.flamegraph.enabled: true
 
+# ====== JDK ======
+# Flink 1.19 官方支持 Java 11/17,不支持 JDK 21+。
+# 系统默认 java 可能是 JDK 25(给 Kafka/StarRocks),必须显式指定 JDK 17,
+# 否则 Kryo 反射访问 java.util.Arrays$ArrayList 等内部字段会报
+# InaccessibleObjectException(module java.base does not "opens java.util")。
+env.java.home: /usr/lib/jvm/java-17-openjdk
+
 # ====== 日志 ======
 env.java.opts.all: -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:+AlwaysPreTouch
 ```
@@ -4723,7 +4730,7 @@ scp target/flink-agg5m-starrocks-1.0.0.jar jm-1:/opt/flink/jobs/
   --topic prom.sz.routed.app_business \
   --group-id flink-agg5m-sz-app-business \
   --starrocks-host <beijing-fe-vip> \
-  --starrocks-port 8070 \
+  --starrocks-port 8030 \
   --starrocks-db prom \
   --starrocks-table sr_bj_metrics_5m \
   --starrocks-user root \
@@ -5198,7 +5205,7 @@ curl -s http://jm-1:8081/jobs/<job-id>/checkpoints | python3 -m json.tool
 | `--topic` | `prom.local.routed.app_business` | 消费的 Kafka topic |
 | `--group-id` | `flink-agg5m-local` | Kafka consumer group ID |
 | `--starrocks-host` | `localhost` | StarRocks FE VIP |
-| `--starrocks-port` | `8070` | StarRocks Stream Load 端口 |
+| `--starrocks-port` | `8030` | StarRocks FE HTTP 端口(Stream Load 复用,无 8070) |
 | `--starrocks-db` | `prom` | StarRocks 数据库 |
 | `--starrocks-table` | `sr_bj_metrics_5m` | StarRocks 表名 |
 | `--starrocks-user` | `root` | StarRocks 用户名 |
@@ -5393,9 +5400,10 @@ Flink 通常消费 **路由后(cleaned/routed)的 topic**,因为这些数据已�
 
 - **生产**:北京 3 节点(FE+BE 混合,64C/512G/1.92T×22 SSD)
 - **端口**:
-  - `8030`:FE Web UI
-  - `8070`:Stream Load(Flink 用)
-  - `9060`:查询服务
+  - `8030`:FE HTTP(Web UI + REST API + Stream Load)
+  - `9030`:MySQL 协议(查询)
+  - `8040`:BE HTTP(FE 收到 Stream Load 后 307 redirect 到此端口)
+  - 无 `8070` 端口,旧文档中的 8070 引用已废弃
 - **FE VIP**:负载均衡,所有 Stream Load 请求走 VIP
 
 #### 3.3 Flink 集群
@@ -6039,7 +6047,7 @@ public class AggWindowFunction
 | 方案 | 实现 | 适用 |
 |---|---|---|
 | **官方 connector** | `flink-connector-starrocks` | 推荐,自动批量 + 重试 + at-least-once |
-| 手写 HTTP | 直接调 `http://<fe-vip>:8070/api/<db>/<table>/_stream_load` | 精细控制场景 |
+| 手写 HTTP | 直接调 `http://<fe-vip>:8030/api/<db>/<table>/_stream_load` | 精细控制场景 |
 
 #### 9.2 官方 connector 配置
 
@@ -6049,7 +6057,7 @@ import com.starrocks.connector.flink.table.sink.StarRocksSinkOptions;
 
 StarRocksSinkOptions options = StarRocksSinkOptions.builder()
     .withProperty("jdbc-url", "jdbc:mysql://<fe-vip>:9030")
-    .withProperty("load-url", "http://<fe-vip>:8070")
+    .withProperty("load-url", "http://<fe-vip>:8030")
     .withProperty("database-name", "default_cluster:prom")
     .withProperty("table-name", "sr_bj_metrics_5m")
     .withProperty("username", "root")
@@ -6188,7 +6196,7 @@ public class StarRocksSinkWithRetry extends RichSinkFunction<AggResult> {
 
     @Override
     public void open(Configuration parameters) {
-        client = new StarRocksStreamLoadClient(feVip, 8070, "prom", "sr_bj_metrics_5m", user, pwd);
+        client = new StarRocksStreamLoadClient(feVip, 8030, "prom", "sr_bj_metrics_5m", user, pwd);
         // DLQ producer
         Properties p = new Properties();
         p.put("bootstrap.servers", localKafkaBrokers);
@@ -6277,7 +6285,7 @@ public static void main(String[] args) throws Exception {
     // 本地配置
     String kafkaBrokers = "localhost:9092";
     String topic        = "prom.local.routed.app_business";
-    String starrocksUrl = "http://localhost:8070";  // 本地 StarRocks(可选 Docker)
+    String starrocksUrl = "http://localhost:8030";  // 本地 StarRocks(可选 Docker)
 
     buildPipeline(env, kafkaBrokers, topic, starrocksUrl, "local_5m");
 
@@ -6367,7 +6375,7 @@ flink run \
   --city sz \
   --kafka-brokers kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094 \
   --topic prom.sz.routed.app_business \
-  --starrocks-url http://<beijing-fe-vip>:8070 \
+  --starrocks-url http://<beijing-fe-vip>:8030 \
   --label-prefix sz_5m \
   --dlq-topic prom.sz.dlq.sr.5m
 
@@ -6381,7 +6389,7 @@ flink run \
 | `--city` | `sz` | `hf` |
 | `--kafka-brokers` | `kafka-1.sz:9094,...` | `kafka-1.hf:9094,...` |
 | `--topic` | `prom.sz.routed.app_business` | `prom.hf.routed.app_business` |
-| `--starrocks-url` | `http://<beijing-fe-vip>:8070` | 同 |
+| `--starrocks-url` | `http://<beijing-fe-vip>:8030` | 同 |
 | `--label-prefix` | `sz_5m` | `hf_5m` |
 | `--dlq-topic` | `prom.sz.dlq.sr.5m` | `prom.hf.dlq.sr.5m` |
 | 并行度 | 24(按 12 partition × 2 TM) | 8 |

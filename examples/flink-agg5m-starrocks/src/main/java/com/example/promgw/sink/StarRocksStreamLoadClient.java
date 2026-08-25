@@ -23,20 +23,22 @@ import org.slf4j.LoggerFactory;
  *   - 支持 gzip 压缩(Content-Encoding: gzip),跨城带宽减半
  *   - PK 模型表自动按主键去重
  */
-public class StarRocksStreamLoadClient {
+public class StarRocksStreamLoadClient implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksStreamLoadClient.class);
 
     private final String loadUrl;
     private final String authHeader;
     private final RequestConfig requestConfig;
+    private final CloseableHttpClient client;
 
     /** 默认超时 60s(Stream Load 大批量写入可能较慢) */
     private static final int DEFAULT_TIMEOUT_MS = 60_000;
 
     /**
      * @param feHost  StarRocks FE VIP host
-     * @param port    Stream Load 端口(通常 8070 或 8030)
+     * @param port    FE HTTP 端口(默认 8030,与 fe.conf 的 http_port 一致;
+     *                StarRocks 没有 8070 端口,请勿使用)
      * @param db      数据库名
      * @param table   表名
      * @param user    用户名
@@ -53,6 +55,9 @@ public class StarRocksStreamLoadClient {
                 .setConnectTimeout(DEFAULT_TIMEOUT_MS)
                 .setSocketTimeout(DEFAULT_TIMEOUT_MS)
                 .build();
+        // 复用 HttpClient(连接池),避免每次 load 都新建 client 导致大量 TIME_WAIT
+        // socket 和 DNS 解析开销。Flink sink 是单线程串行调用,无需同步。
+        this.client = HttpClients.createDefault();
     }
 
     /**
@@ -65,33 +70,38 @@ public class StarRocksStreamLoadClient {
      * @throws IOException HTTP 非 200 或网络错误
      */
     public String load(String label, String jsonBody, boolean gzip) throws IOException {
-        try (CloseableHttpClient client = HttpClients.createDefault()) {
-            HttpPut put = new HttpPut(loadUrl);
-            put.setConfig(requestConfig);
-            put.setHeader("Authorization", authHeader);
-            put.setHeader("Label", label);
-            put.setHeader("Format", "json");
-            put.setHeader("strip_outer_array", "true");
-            put.setHeader("Expect", "100-continue");
+        HttpPut put = new HttpPut(loadUrl);
+        put.setConfig(requestConfig);
+        put.setHeader("Authorization", authHeader);
+        put.setHeader("Label", label);
+        put.setHeader("Format", "json");
+        put.setHeader("strip_outer_array", "true");
+        put.setHeader("Expect", "100-continue");
 
-            byte[] body = jsonBody.getBytes(StandardCharsets.UTF_8);
-            if (gzip) {
-                body = gzipCompress(body);
-                put.setHeader("Content-Encoding", "gzip");
-            }
-            put.setEntity(new ByteArrayEntity(body));
+        byte[] body = jsonBody.getBytes(StandardCharsets.UTF_8);
+        if (gzip) {
+            body = gzipCompress(body);
+            put.setHeader("Content-Encoding", "gzip");
+        }
+        put.setEntity(new ByteArrayEntity(body));
 
-            try (CloseableHttpResponse resp = client.execute(put)) {
-                String result = EntityUtils.toString(resp.getEntity(), StandardCharsets.UTF_8);
-                int code = resp.getStatusLine().getStatusCode();
-                if (code != 200) {
-                    throw new IOException("Stream Load failed: HTTP " + code + ", resp=" + result);
-                }
-                if (LOG.isDebugEnabled()) {
-                    LOG.debug("Stream Load ok: label={}, respLen={}", label, result.length());
-                }
-                return result;
+        try (CloseableHttpResponse resp = client.execute(put)) {
+            String result = EntityUtils.toString(resp.getEntity(), StandardCharsets.UTF_8);
+            int code = resp.getStatusLine().getStatusCode();
+            if (code != 200) {
+                throw new IOException("Stream Load failed: HTTP " + code + ", resp=" + result);
             }
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("Stream Load ok: label={}, respLen={}", label, result.length());
+            }
+            return result;
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        if (client != null) {
+            client.close();
         }
     }
 

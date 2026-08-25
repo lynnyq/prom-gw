@@ -139,9 +139,59 @@ public class Agg5mJob {
                 .setBootstrapServers(cfg.kafkaBrokers)
                 .setTopics(cfg.kafkaTopic)
                 .setGroupId(cfg.kafkaGroupId)
-                .setStartingOffsets(OffsetsInitializer.committedOffsets(OffsetResetStrategy.LATEST))
+                .setStartingOffsets(buildOffsetsInitializer(cfg))
                 .setDeserializer(new KafkaRecordDeserializer())
                 .setProperties(props)
                 .build();
+    }
+
+    /**
+     * buildOffsetsInitializer 根据配置构造 Kafka 起始位点策略。
+     *
+     * 支持的 kafkaStartFrom 取值:
+     *   committed  - 从已提交位点消费,无位点时按 kafkaOffsetReset 重置(默认)
+     *   earliest   - 从最早位点消费
+     *   latest     - 从最新位点消费
+     *   timestamp  - 从 kafkaStartTimestamp(epoch millis)之后的首个位点消费
+     */
+    static OffsetsInitializer buildOffsetsInitializer(JobConfig cfg) {
+        String startFrom = cfg.kafkaStartFrom == null ? "" : cfg.kafkaStartFrom.trim().toLowerCase();
+        switch (startFrom) {
+            case "earliest":
+                return OffsetsInitializer.earliest();
+            case "latest":
+                return OffsetsInitializer.latest();
+            case "timestamp":
+                if (cfg.kafkaStartTimestamp <= 0L) {
+                    throw new IllegalArgumentException(
+                            "--kafka-start-timestamp 必须为正数(epoch millis) when --kafka-start-from=timestamp");
+                }
+                return OffsetsInitializer.timestamp(cfg.kafkaStartTimestamp);
+            case "committed":
+            case "":
+                return OffsetsInitializer.committedOffsets(parseOffsetResetStrategy(cfg.kafkaOffsetReset));
+            default:
+                throw new IllegalArgumentException(
+                        "不支持的 --kafka-start-from 取值: " + cfg.kafkaStartFrom
+                                + " (可选: committed/earliest/latest/timestamp)");
+        }
+    }
+
+    /** parseOffsetResetStrategy 解析无已提交位点时的重置策略。 */
+    private static OffsetResetStrategy parseOffsetResetStrategy(String reset) {
+        String r = reset == null ? "" : reset.trim().toLowerCase();
+        switch (r) {
+            case "earliest":
+                return OffsetResetStrategy.EARLIEST;
+            case "none":
+                return OffsetResetStrategy.NONE;
+            case "latest":
+            case "":
+                return OffsetResetStrategy.LATEST;
+            default:
+                throw new IllegalArgumentException(
+                        "不支持的 --kafka-offset-reset 取值: " + reset
+                                + " (可选: earliest/latest/none)");
+        }
     }
 }

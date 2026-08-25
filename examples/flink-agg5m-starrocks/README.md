@@ -81,8 +81,12 @@ mvn test
 [INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.decoder.PromWriteRequestDecoderTest
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.JobConfigTest
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.Agg5mJobOffsetsTest
+[INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Results:
-[INFO] Tests run: 17, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 40, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -92,6 +96,8 @@ mvn test
 | `LabelsHasherTest` | 7 | SHA-1 哈希稳定性、空 labels、排序一致性 |
 | `MetricAggFunctionTest` | 4 | 5min 窗口聚合 sum/count/max/min/avg/p50/p99 |
 | `PromWriteRequestDecoderTest` | 6 | snappy 解压 + protobuf 解码 + 样本提取 |
+| `JobConfigTest` | 8 | Kafka offset 参数解析与默认值 |
+| `Agg5mJobOffsetsTest` | 15 | 起始位点策略构建、非法取值与 timestamp 校验 |
 
 ### 步骤 3:打包验证
 
@@ -151,7 +157,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 ```
 [main] INFO com.example.promgw.Agg5mJob - Starting Agg5mJob env=local
 [main] INFO com.example.promgw.Agg5mJob - Kafka source: brokers=localhost:9092, topic=prom.local.routed.app_business
-[main] INFO com.example.promgw.Agg5mJob - StarRocks sink: host=localhost:8070, db=prom, table=metrics_5m
+[main] INFO com.example.promgw.Agg5mJob - StarRocks sink: host=localhost:8030, db=prom, table=metrics_5m
 [flink-...-source] INFO com.example.promgw.decoder.PromWriteRequestDecoder - decoded 12 samples from 1 WriteRequest
 ```
 
@@ -293,10 +299,46 @@ payload 是 Prometheus 原始字节,不含租户信息。tenant/source_dc/ingest
 | `--kafka-brokers` | Kafka broker 列表 | localhost:9092 |
 | `--topic` | 消费的 Kafka topic | prom.local.routed.app_business |
 | `--starrocks-host` | StarRocks FE VIP | localhost |
-| `--starrocks-port` | Stream Load 端口 | 8070 |
+| `--starrocks-port` | FE HTTP 端口(Stream Load 复用) | 8030 |
 | `--label-prefix` | Stream Load label 前缀 | local_5m |
 | `--window-minutes` | 聚合窗口(分钟) | 5 |
 | `--checkpoint-path` | checkpoint 存储路径 | file:///tmp/flink-checkpoints |
+| `--kafka-start-from` | Kafka 起始位点策略:committed/earliest/latest/timestamp | committed |
+| `--kafka-offset-reset` | 无已提交位点时的重置策略:earliest/latest/none | latest |
+| `--kafka-start-timestamp` | 起始时间戳(epoch millis,`--kafka-start-from=timestamp` 时必填) | 0 |
+
+### Kafka 消费位点参数说明
+
+`--kafka-start-from` 控制 Flink 作业启动时从哪个位点开始消费 Kafka:
+
+| 取值 | 行为 | 说明 |
+|---|---|---|
+| `committed` | 从已提交位点消费(默认) | 首次启动无位点时按 `--kafka-offset-reset` 重置,适合正常增量消费 |
+| `earliest` | 从最早位点消费 | 回放历史全量数据 |
+| `latest` | 从最新位点消费 | 跳过历史数据,仅消费启动后的新数据 |
+| `timestamp` | 从指定时间戳消费 | 配合 `--kafka-start-timestamp` 按时间点回放,适合故障恢复 |
+
+`--kafka-offset-reset` 仅在 `--kafka-start-from=committed` 且无已提交位点时生效:
+
+| 取值 | 行为 |
+|---|---|
+| `latest`(默认) | 从最新位点开始 |
+| `earliest` | 从最早位点开始 |
+| `none` | 抛出异常,不自动重置 |
+
+示例:
+
+```bash
+# 从最早位点回放历史数据
+flink run -d -c com.example.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
+  --env prod --kafka-brokers kafka-1.sz:9094 --topic prom.sz.routed.app_business \
+  --kafka-start-from earliest
+
+# 从指定时间戳回放(用于故障恢复)
+flink run -d -c com.example.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
+  --env prod --kafka-brokers kafka-1.sz:9094 --topic prom.sz.routed.app_business \
+  --kafka-start-from timestamp --kafka-start-timestamp 1700000000000
+```
 
 ## 相关文档
 

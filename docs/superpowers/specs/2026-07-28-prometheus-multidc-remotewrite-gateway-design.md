@@ -253,7 +253,7 @@ flowchart TB
 - **Prom → LVS**:10G 同城 LAN,Prometheus `remote_write` 到 LVS VIP(LVS 双节点主备走 Keepalived)
 - **LVS → prom-gw**:内网 10G,LVS DR 模式直接转发
 - **prom-gw → Kafka**:10G 内网,Kafka `advertised.listeners` 绑定内网 VIP
-- **Flink → StarRocks**:走 HTTP `8070` Stream Load,FE VIP 负载均衡
+- **Flink → StarRocks**:走 HTTP `8030` Stream Load(FE `http_port`),FE VIP 负载均衡
 - **跨城专线**(1G 共享池,无 10G):
   - 深圳 ⇄ 北京:**主 + 备 2 条 1Gbps** 专线,BGP 冗余;**项目配额 1G**(整个共享池上限)
   - 合肥 ⇄ 北京:**1 条 1Gbps** 专线(单线,故障时降级本地 ClickHouse);**项目配额 1G**
@@ -744,7 +744,7 @@ prom.hf.agg.<business>
 
 **跨城写入要点**:
 
-- **连接方式**:Flink 走 HTTP `8070` Stream Load(北京 StarRocks FE VIP),**仅内网专线**
+- **连接方式**:Flink 走 HTTP `8030` Stream Load(北京 StarRocks FE `http_port`),**仅内网专线**
 - **跨城带宽**:**5 min 主体 三城合计 ≈ 1 TB/天(Stream Load gzip 压缩后),平均 12 MB/s,峰值 36 MB/s(3×)**;**占 1G 专线配额 9.3%**,若超出则降级为 1 h 跨城,详见 §2.2.6 (5) 跨城带宽重估
 - **并发控制**:每城 1 个独立 Stream Load Label,`bj_5m` / `sz_5m` / `hf_5m`,FE 自动负载均衡
 - **重试**:Stream Load 失败本地重试 N 次 + 落盘(spill to 本城 DLQ topic `prom.<city>.dlq.sr.5m`)

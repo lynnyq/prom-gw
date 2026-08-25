@@ -95,10 +95,16 @@ public class StarRocksSink extends RichSinkFunction<AggResult> {
 
     @Override
     public void close() throws Exception {
-        if (dlqHandler != null) {
-            dlqHandler.close();
+        try {
+            if (client != null) {
+                client.close();
+            }
+        } finally {
+            if (dlqHandler != null) {
+                dlqHandler.close();
+            }
+            super.close();
         }
-        super.close();
     }
 
     /** toJson 把 AggResult 转为 StarRocks Stream Load 期望的 JSON。 */

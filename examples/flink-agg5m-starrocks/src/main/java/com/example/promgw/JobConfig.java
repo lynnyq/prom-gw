@@ -20,9 +20,19 @@ public class JobConfig {
     public String kafkaSslTruststorePassword = "";
     public int sourceParallelism = 4;
 
+    // Kafka offset 起始策略:committed(默认,从已提交位点)/earliest/latest/timestamp
+    public String kafkaStartFrom = "committed";
+    // 无已提交位点时的重置策略:earliest/latest/none(默认 latest)
+    public String kafkaOffsetReset = "latest";
+    // kafkaStartFrom=timestamp 时使用的起始时间戳(epoch millis)
+    public long kafkaStartTimestamp = 0L;
+
     // StarRocks
+    // srPort 默认 8030(FE http_port),StarRocks Stream Load 复用 FE HTTP 端口,
+    // FE 收到请求后会 307 redirect 到 BE 的 be_http_port(8040)。
+    // 不要用 8070 — 部署文档曾误标为 "Stream Load 端口",实际从未配置监听。
     public String srHost = "localhost";
-    public int srPort = 8070;
+    public int srPort = 8030;
     public String srDb = "prom";
     public String srTable = "sr_bj_metrics_5m";
     public String srUser = "root";
@@ -106,6 +116,15 @@ public class JobConfig {
                 case "--allowed-lateness-ms":
                     cfg.allowedLatenessMs = Long.parseLong(next(args, ++i));
                     break;
+                case "--kafka-start-from":
+                    cfg.kafkaStartFrom = next(args, ++i);
+                    break;
+                case "--kafka-offset-reset":
+                    cfg.kafkaOffsetReset = next(args, ++i);
+                    break;
+                case "--kafka-start-timestamp":
+                    cfg.kafkaStartTimestamp = Long.parseLong(next(args, ++i));
+                    break;
                 default:
                     // 忽略未知参数
             }
@@ -132,6 +151,9 @@ public class JobConfig {
         return "JobConfig{env='" + env + "', kafkaBrokers='" + kafkaBrokers
                 + "', topic='" + kafkaTopic + "', srHost='" + srHost + ":" + srPort
                 + "', srTable='" + srDb + "." + srTable + "', dlqTopic='" + dlqTopic
-                + "', windowMinutes=" + windowMinutes + "}";
+                + "', windowMinutes=" + windowMinutes
+                + ", kafkaStartFrom='" + kafkaStartFrom
+                + "', kafkaOffsetReset='" + kafkaOffsetReset
+                + "', kafkaStartTimestamp=" + kafkaStartTimestamp + "}";
     }
 }
