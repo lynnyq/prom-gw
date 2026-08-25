@@ -30,6 +30,7 @@
 | 11 | [安全审计报告](11-security-audit.md) | 安全加固清单、Token 管理、网络隔离 |
 | 12 | [压力测试指南](12-stress-test.md) | 压测方案、性能基线、Profile 分析 |
 | 13 | [端到端测试验证](13-end-to-end-testing.md) | WAL-only 冒烟、完整链路、故障切换测试 |
+| 14 | [DLQ 兜底重放工具部署与配置详解](14-dlq-replayer-deployment.md) | 消费 DLQ topic 重放 Stream Load,毒丸消息处理,多城部署 |
 
 ## 统一约定
 

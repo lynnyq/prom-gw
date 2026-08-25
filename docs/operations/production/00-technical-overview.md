@@ -133,20 +133,23 @@ HTTP Body (snappy+protobuf)
 
 | Topic | 分区 | 副本 | 留存 | 说明 |
 |-------|------|------|------|------|
-| `prom.bj.raw.app_business` | 64 | 3 | 3 天 | 北京 app 业务原始数据 |
-| `prom.bj.raw.infra` | 64 | 3 | 3 天 | 北京基础设施原始数据 |
-| `prom.bj.routed.app_business` | 64 | 3 | 3 天 | 北京路由后 app 业务 |
-| `prom.bj.routed.infra` | 64 | 3 | 3 天 | 北京路由后基础设施 |
-| `prom.bj.routed.core` | 64 | 3 | 3 天 | 北京路由后核心指标 |
-| `prom.bj.routed.data` | 64 | 3 | 3 天 | 北京路由后数据指标 |
-| `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | Stream Load 失败 DLQ |
+| `prom.bj.raw.app_business` | 64 | 3 | 3 天 | 北京 app 业务原始数据(prom-gw 写入) |
+| `prom.bj.raw.infra` | 64 | 3 | 3 天 | 北京基础设施原始数据(prom-gw 写入) |
+| `prom.bj.routed.app_business` | 64 | 3 | 3 天 | 北京路由后 app 业务(Flink 消费源) |
+| `prom.bj.routed.infra` | 64 | 3 | 3 天 | 北京路由后基础设施(Flink 消费源) |
+| `prom.bj.routed.core` | 64 | 3 | 3 天 | 北京路由后核心指标(Flink 消费源) |
+| `prom.bj.routed.data` | 64 | 3 | 3 天 | 北京路由后数据指标(Flink 消费源) |
+| `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | StarRocks Stream Load 失败的死信队列(Flink 写入,运维重放工具消费) |
 
 深圳(`sz`)、合肥(`hf`)同理。
 
 ### 2.4 Flink 消费与聚合流
 
+> **注意**:Flink 聚合后**直接** Stream Load 写入 StarRocks,不经过 Kafka 中转。
+> `prom.<city>.dlq.sr.5m` topic 仅在 Stream Load 失败时作为死信队列使用,不是主流向。
+
 ```
-Kafka topic (prom.<city>.routed.app_business)
+Kafka topic (prom.<city>.routed.app_business)   ← prom-gw 写入的原始数据
     │
     ▼ KafkaSource (Exactly-Once, checkpoint)
     │
@@ -168,15 +171,19 @@ Kafka topic (prom.<city>.routed.app_business)
     │     - histogram buckets (if type=histogram)
     │     - 生成 5min 聚合行
     │
-    ▼ StarRocksSink.invoke()
-    │   1. 攒批 (buffer = 5000 行 或 10s 超时)
-    │   2. JSON 序列化 (strip_outer_array=true)
-    │   3. gzip 压缩 (跨城场景)
-    │   4. HTTP PUT → FE:8030/api/<db>/<table>/_stream_load
-    │   5. FE 307 redirect → BE:8040
-    │   6. 失败重试 3 次 → 仍失败写入 DLQ topic
+    ▼ StarRocksSink.invoke()   ← 直连 StarRocks,不写 Kafka
+    │   1. JSON 序列化 (strip_outer_array=true)
+    │   2. gzip 压缩 (跨城场景)
+    │   3. HTTP PUT → FE:8030/api/<db>/<table>/_stream_load
+    │   4. FE 307 redirect → BE:8040
+    │   5. 成功 → 完成(数据已落 StarRocks)
+    │   6. 失败 → 重试 3 次(1s/2s/4s 退避)
+    │   7. 3 次仍失败 → 写入 DLQ topic(兜底,不丢数据)
     │
-    ▼ StarRocks sr_bj_metrics_5m (3副本, 动态分区, 7天TTL)
+    ├──→ 正常: StarRocks sr_bj_metrics_5m (3副本, 动态分区, 7天TTL)
+    │
+    └──→ 异常: Kafka prom.<city>.dlq.sr.5m (死信队列,7天留存)
+                ↑ 由运维重放工具消费,重新 Stream Load 到 StarRocks
 ```
 
 ### 2.5 StarRocks 多级聚合

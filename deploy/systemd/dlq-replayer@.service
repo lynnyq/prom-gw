@@ -1,0 +1,69 @@
+[Unit]
+Description=prom-gw DLQ Replayer (city=%i)
+Documentation=file:///appdata/dlq-replayer/README.md
+After=network-online.target kafka.service starrocks-fe.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bdops
+Group=bdops
+
+# 城市标识通过 %i 传入(bj/sz/hf)
+Environment=DLQ_CITY=%i
+EnvironmentFile=-/appdata/dlq-replayer/conf/dlq-replayer.%i.env
+
+WorkingDirectory=/appdata/dlq-replayer
+ExecStart=/usr/lib/jvm/java-17-openjdk/bin/java \
+    -Xms512m -Xmx2g \
+    -XX:+UseG1GC \
+    -XX:MaxGCPauseMillis=100 \
+    -XX:+AlwaysPreTouch \
+    -XX:+HeapDumpOnOutOfMemoryError \
+    -XX:HeapDumpPath=/applog/dlq-replayer/ \
+    -Dlog.level=${LOG_LEVEL} \
+    -Dlog.dir=/applog/dlq-replayer \
+    -Dcity=%i \
+    -jar /appdata/dlq-replayer/lib/dlq-replayer.jar \
+    --city %i \
+    --config /appdata/dlq-replayer/conf/dlq-replayer.properties
+
+# 优雅停机:SIGTERM 触发消费者优雅关闭(提交已处理 offset,停止 poll)
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+FinalKillSignal=SIGKILL
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+TasksMax=1024
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/appdata/dlq-replayer /applog/dlq-replayer
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+
+# 日志走 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dlq-replayer
+
+[Install]
+WantedBy=multi-user.target
