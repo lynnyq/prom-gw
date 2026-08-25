@@ -234,7 +234,7 @@ min.insync.replicas=2
 log.retention.hours=72                    # 3 天留存
 log.retention.bytes=-1                    # 按时间清理,不限字节
 log.segment.bytes=1073741824              # 1GB segment
-log.cleanup.policy=delete                 # 原始数据 topic 用 delete
+log.cleanup.policy=delete                 # routed topic 用 delete
 compression.type=producer                 # 由 producer 决定(prom-gw 用 zstd)
 
 # ====== 性能 ======
@@ -342,20 +342,6 @@ sudo systemctl start kafka
 ### 4.1 创建 Topic
 
 ```bash
-# 原始数据 topic(每城每个 tenant 一个)
-for city in bj sz hf; do
-  for tenant in app_business infra; do
-    /appdata/kafka/bin/kafka-topics.sh \
-      --bootstrap-server kafka-1:9092 \
-      --create --topic prom.${city}.raw.${tenant} \
-      --partitions 64 \
-      --replication-factor 3 \
-      --config retention.ms=259200000 \
-      --config compression.type=producer \
-      --config max.message.bytes=10485760
-  done
-done
-
 # 路由后 topic
 for city in bj sz hf; do
   for biz in core infra data app_business; do
@@ -411,18 +397,18 @@ done
 # 查看 topic 详情
 /appdata/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka-1:9092 \
-  --describe --topic prom.sz.raw.app_business
+  --describe --topic prom.sz.routed.app_business
 
 # 增加 partition(只能增,不能减)
 /appdata/kafka/bin/kafka-topics.sh \
   --bootstrap-server kafka-1:9092 \
-  --alter --topic prom.sz.raw.app_business \
+  --alter --topic prom.sz.routed.app_business \
   --partitions 128
 
 # 修改 topic 配置
 /appdata/kafka/bin/kafka-configs.sh \
   --bootstrap-server kafka-1:9092 \
-  --alter --topic prom.sz.raw.app_business \
+  --alter --topic prom.sz.routed.app_business \
   --add-config retention.ms=172800000  # 改为 2 天
 
 # 删除 topic(谨慎!)
@@ -686,18 +672,18 @@ echo "net.core.netdev_max_backlog=5000" >> /etc/sysctl.d/99-kafka.conf
 # 生产测试
 /appdata/kafka/bin/kafka-console-producer.sh \
   --bootstrap-server kafka-1:9092 \
-  --topic prom.sz.raw.app_business
+  --topic prom.sz.routed.app_business
 
 # 消费测试
 /appdata/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server kafka-1:9092 \
-  --topic prom.sz.raw.app_business \
+  --topic prom.sz.routed.app_business \
   --from-beginning --max-messages 10 --timeout-ms 10000
 
 # 生产性能测试
 /appdata/kafka/bin/kafka-producer-perf-test.sh \
   --producer-props bootstrap.servers=kafka-1:9092 \
-  --topic prom.sz.raw.app_business \
+  --topic prom.sz.routed.app_business \
   --num-records 100000 \
   --record-size 1024 \
   --throughput 50000
@@ -705,7 +691,7 @@ echo "net.core.netdev_max_backlog=5000" >> /etc/sysctl.d/99-kafka.conf
 # 消费性能测试
 /appdata/kafka/bin/kafka-consumer-perf-test.sh \
   --bootstrap-server kafka-1:9092 \
-  --topic prom.sz.raw.app_business \
+  --topic prom.sz.routed.app_business \
   --messages 100000 \
   --threads 4
 ```

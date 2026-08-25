@@ -23,7 +23,6 @@
 | 计算层 | Flink 1.19 Standalone HA | 窗口聚合 + Checkpoint 精确一次语义 |
 | 存储层 | StarRocks 3.3 | 存算一体,Stream Load 高速写入,物化视图级联聚合 |
 | 负载均衡 | LVS + Keepalived | 4 层 DR 模式,低延迟高吞吐 |
-| 配置中心 | Nacos | 动态路由规则推送,多集群统一管理 |
 
 ### 1.3 三级分层架构
 
@@ -129,19 +128,186 @@ HTTP Body (snappy+protobuf)
 
 ### 2.3 Kafka Topic 规划
 
-每城独立 Kafka 集群,topic 命名规则:`prom.<city>.<stage>.<category>`
+#### 2.3.1 命名规则
 
-| Topic | 分区 | 副本 | 留存 | 说明 |
-|-------|------|------|------|------|
-| `prom.bj.raw.app_business` | 64 | 3 | 3 天 | 北京 app 业务原始数据(prom-gw 写入) |
-| `prom.bj.raw.infra` | 64 | 3 | 3 天 | 北京基础设施原始数据(prom-gw 写入) |
-| `prom.bj.routed.app_business` | 64 | 3 | 3 天 | 北京路由后 app 业务(Flink 消费源) |
-| `prom.bj.routed.infra` | 64 | 3 | 3 天 | 北京路由后基础设施(Flink 消费源) |
-| `prom.bj.routed.core` | 64 | 3 | 3 天 | 北京路由后核心指标(Flink 消费源) |
-| `prom.bj.routed.data` | 64 | 3 | 3 天 | 北京路由后数据指标(Flink 消费源) |
-| `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | StarRocks Stream Load 失败的死信队列(Flink 写入,运维重放工具消费) |
+每城独立 Kafka 集群,topic 命名统一规则:
 
-深圳(`sz`)、合肥(`hf`)同理。
+```
+prom.<city>.<category>
+       │       │
+       │       └── 业务分类:routed.core / routed.infra / routed.data / routed.app_business / dlq.sr.5m
+       └────────── 城市:bj(北京)/ sz(深圳)/ hf(合肥)/ local(开发环境)
+```
+
+**设计原则**:
+
+1. **城市维度隔离**:每城独立 Kafka 集群,topic 名带城市前缀,避免跨城误消费
+2. **按团队分桶**:按 `team` 标签将数据路由到 `core`/`infra`/`data`/`app_business` 等独立 topic,便于按业务域并行消费
+3. **DLQ 独立**:死信队列单独 topic,分区数少(8),留存时间长(7 天),便于运维重放
+
+> **架构说明**:prom-gw 采用**单进程同步处理**,收到 Prometheus remote_write 后在进程内完成 relabel + route,直接写入目标 topic。**不存在 raw → routed 两阶段异步消费**,无需 raw topic 中转。
+
+#### 2.3.2 Topic 分类详解
+
+**数据 topic(prom-gw 同步写入)**
+
+prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清洗)+ route(按 team 分桶),直接将原始 snappy+protobuf body 写入对应的 topic。payload 未经修改,附加了路由 headers(`tenant`、`source_dc`、`ingest_city` 等)。
+
+| Topic | 写入方 | 路由规则 | 消费方 | 用途 |
+|-------|--------|---------|--------|------|
+| `prom.bj.routed.core` | prom-gw | `team=core` | Flink (core 聚合作业) | 核心业务指标(订单/支付/账户) |
+| `prom.bj.routed.infra` | prom-gw | `team=infra` | Flink (infra 聚合作业) | 基础设施指标(主机/网络) |
+| `prom.bj.routed.data` | prom-gw | `team=data` | Flink (data 聚合作业) | 数据平台指标(离线/实时计算) |
+| `prom.bj.routed.app_business` | prom-gw | `team` 未命中规则兜底 | Flink (app_business 聚合作业) | 通用业务指标兜底桶 |
+
+> **配置位置**:[configs/rules/app-business.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml) 的 `route.rules` 和 `default_topic` 字段。
+
+**路由规则示例**(来自 [app-business.yaml:29-36](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml#L29-L36)):
+
+```yaml
+- type: route
+  rules:
+    - match: { team: "core" }   # 核心业务团队 → prom.bj.routed.core
+      topic: prom.bj.routed.core
+    - match: { team: "infra" }  # 基础设施团队 → prom.bj.routed.infra
+      topic: prom.bj.routed.infra
+    - match: { team: "data" }   # 数据团队 → prom.bj.routed.data
+      topic: prom.bj.routed.data
+  # default_topic: prom.bj.routed.app_business  (兜底桶)
+```
+
+**死信队列 topic(Flink 写入)**
+
+| Topic | 写入方 | 消费方 | 触发条件 | 留存 |
+|-------|--------|--------|---------|------|
+| `prom.bj.dlq.sr.5m` | Flink StarRocksSink | DLQ 重放工具 | Stream Load 3 次重试失败 | 7 天 |
+
+DLQ topic 中消息格式为 JSON,包含原始 AggResult、label(用于幂等去重)、失败原因、重试次数。详见 [14-dlq-replayer-deployment.md](14-dlq-replayer-deployment.md) 第 1.3 节。
+
+#### 2.3.3 Topic 总览表
+
+| Topic | 分区 | 副本 | 留存 | 写入方 | 消费方 | 说明 |
+|-------|------|------|------|--------|--------|------|
+| `prom.bj.routed.core` | 64 | 3 | 3 天 | prom-gw | Flink (core 作业) | 核心业务数据(team=core) |
+| `prom.bj.routed.infra` | 64 | 3 | 3 天 | prom-gw | Flink (infra 作业) | 基础设施数据(team=infra) |
+| `prom.bj.routed.data` | 64 | 3 | 3 天 | prom-gw | Flink (data 作业) | 数据平台数据(team=data) |
+| `prom.bj.routed.app_business` | 64 | 3 | 3 天 | prom-gw | Flink (app_business 作业) | 通用业务兜底桶 |
+| `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | Flink StarRocksSink | DLQ 重放工具 | Stream Load 失败死信队列 |
+
+深圳(`sz`)、合肥(`hf`)同理,分别使用 `prom.sz.*` 和 `prom.hf.*` 前缀。
+
+**三城 topic 总数**:每城 5 个 × 3 城 = **15 个 topic**。
+
+#### 2.3.4 数据流向
+
+```
+Prometheus
+  │ remote_write (snappy+protobuf)
+  ▼
+┌─────────────────────────────────────────────────┐
+│ prom-gw (单进程同步处理)                        │
+│   1. receiver: 验证 token                      │
+│   2. rule engine: relabel + route + sample     │
+│   3. sink: 直接写入 Kafka (routed topic)        │
+│   失败时:写入 WAL 降级,后续自动回灌            │
+└─────────────────────────────────────────────────┘
+  │
+  ▼
+┌─────────────────────────────┐
+│ prom.bj.routed.core         │  ← prom-gw 直接写入
+│ prom.bj.routed.infra        │     payload = 原始 snappy+protobuf body
+│ prom.bj.routed.data         │     headers = {tenant, source_dc, ingest_city}
+│ prom.bj.routed.app_business │     (兜底桶)
+└─────────────────────────────┘
+  │ Flink KafkaSource 消费
+  │   1. 解压 snappy
+  │   2. 解析 protobuf
+  │   3. 5min 窗口聚合
+  │   4. Stream Load → StarRocks
+  ▼
+StarRocks (sr_bj_metrics_5m 表)
+  │
+  │ 若 Stream Load 失败 3 次
+  ▼
+┌─────────────────────────────┐
+│ prom.bj.dlq.sr.5m           │  ← dlq(死信队列)
+└─────────────────────────────┘
+  │ DLQ 重放工具消费
+  │   1. 攒批(100 条或 5s)
+  │   2. 重新 Stream Load(复用原 label 幂等去重)
+  ▼
+StarRocks (重放成功)
+```
+
+#### 2.3.5 topic 创建命令
+
+```bash
+# 数据 topics(按 team 分桶)
+for cat in core infra data app_business; do
+  kafka-topics.sh --bootstrap-server bj-kafka-1:9092 --create \
+    --topic prom.bj.routed.$cat --partitions 64 --replication-factor 3 \
+    --config retention.ms=259200000  # 3 天
+done
+
+# dlq topic(分区少、留存长)
+kafka-topics.sh --bootstrap-server bj-kafka-1:9092 --create \
+  --topic prom.bj.dlq.sr.5m --partitions 8 --replication-factor 3 \
+  --config retention.ms=604800000  # 7 天
+```
+
+#### 2.3.6 为什么规划多个 Topic(目的与用途)
+
+本方案在三城共规划 15 个 topic(每城 5 个 × 3 城),基于以下三个维度的权衡:
+
+**1. 按 team 分桶:业务域隔离,独立扩容**
+
+拆出 `core`/`infra`/`data`/`app_business` 四个桶,而非全部写入一个 topic:
+
+| 维度 | 单 topic 方案 | 多 topic 分桶方案 |
+|------|-------------|------------------|
+| **消费隔离** | 所有 Flink 作业共用一个 consumer group,一个作业 OOM 影响其他 | 各团队 Flink 作业消费独立 topic,互不干扰 |
+| **背压隔离** | 一个团队流量激增(如大促)→ 整个 topic 积压 → 所有团队延迟 | 仅 `routed.core` 积压,`infra`/`data` 不受影响 |
+| **独立扩容** | 只能整体加分区,浪费资源 | 按 topic 实际流量独立调整分区数(核心业务 64,小业务可 16) |
+| **差异化采样** | 全局统一采样率 | core 100% 保留,infra 50% 采样,data 30% 采样(在 ruleset 中按桶配置) |
+| **独立监控** | 无法区分哪个团队的数据异常 | 每个 topic 独立 lag/吞吐监控,故障定位到团队 |
+
+**2. DLQ 独立:异常数据不污染主流**
+
+| 维度 | 若 DLQ 混入数据 topic | 独立 DLQ topic |
+|------|------------------|---------------|
+| 消费逻辑 | Flink 主作业需要同时处理正常+异常数据,逻辑复杂 | 主作业只管正常数据,DLQ 由独立工具消费 |
+| 留存时间 | 正常数据 3 天清理,异常数据可能还没来得及重放就被清理 | DLQ 独立留存 7 天,给运维足够时间处理 |
+| 分区数 | 正常数据 64 分区,DLQ 不需要这么多 | DLQ 独立设 8 分区,节省资源 |
+| 消费组 | DLQ 重放工具与 Flink 主作业共用 consumer group,offset 互相干扰 | 独立 consumer group,互不影响 |
+
+**3. 城市前缀:就近写入 + 故障隔离**
+
+| 维度 | 全国单集群 | 每城独立集群(当前方案) |
+|------|-----------|----------------------|
+| 写入延迟 | 跨城 RTT 20~30ms | 同城 <1ms |
+| 带宽成本 | 所有数据跨城传输,专线带宽压力大 | 数据同城消化,仅聚合结果跨城写 StarRocks |
+| 故障爆炸半径 | Kafka 故障影响全国所有数据 | 单城 Kafka 故障仅影响该城,其他城正常 |
+| 运维独立 | 无法按城市独立升级/重启 | 各城可独立滚动升级 |
+| 合规要求 | 数据跨城流转可能不符合数据驻留要求 | 数据同城闭环 |
+
+topic 名带 `bj`/`sz`/`hf` 前缀,从根本上避免跨城误消费(消费 `prom.sz.*` 的作业绝不会拉到 `prom.bj.*` 的数据)。
+
+**总结:多 topic 规划的核心价值**
+
+```
+数据层 (routed)   → 按业务域分桶,隔离背压,独立扩容
+   ↓
+兜底层 (dlq)      → 异常数据独立留存,不污染主流,可重放
+   × 3 城         → 就近写入,故障隔离,合规驻留
+```
+
+| 设计目标 | 对应 topic 规划 |
+|---------|---------------|
+| 数据不丢 | prom-gw WAL 降级 + DLQ 兜底双重保障 |
+| 故障隔离 | 按城市分集群,按 team 分桶 |
+| 独立扩容 | 每个 routed topic 独立分区数,可按需调整 |
+| 差异化策略 | 各桶可独立配置采样率、留存时间、消费组 |
+| 可运维性 | DLQ 独立 topic + 独立重放工具,不影响主链路 |
 
 ### 2.4 Flink 消费与聚合流
 
@@ -734,4 +900,3 @@ OpenJDK25 → Kafka → Prometheus → prom-gw → StarRocks → Flink
 | Flink ZK | VM 8C/16G | 3/3/3 | 9 |
 | Flink TM | VM 16C/32G/500G SSD | 6/4/2 | 12 |
 | StarRocks FE+BE | 物理机 64C/512G/22×1.92T SSD | 3 (全在北京) | 3 |
-| Nacos | VM 16C/32G | 3 (北京) | 3 |

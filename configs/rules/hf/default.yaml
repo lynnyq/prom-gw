@@ -1,16 +1,69 @@
-# 合肥(hf)机房默认规则集
+# ============================================================
+# prom-gw Ruleset 配置 - 生产环境 - 合肥 (hf)
+# 部署路径: /appdata/prom-gw/conf/rules.yaml
+# 权限要求: chmod 644, owner bdops:bdops
+# 热加载: fsnotify 监听文件变化,自动编译+原子切换
 #
-# 加载方式(spec 9.1 + 9.3):
-#   - prom-gw@hf.service 启动时通过 INGEST_CITY=hf + --config 指向本文件
-#   - 推荐 Ansible 部署时用变量替换:
-#       prom_gw_config: "configs/rules/{{ city }}/default.yaml"
+# 数据流(prom-gw 单进程同步处理):
+#   app-business 租户 → relabel → route → prom.hf.routed.{core,infra,data,app_business}
+#   infra 租户        → relabel          → prom.hf.routed.infra
 #
-# 设计原则(spec 4.4):
-#   - topic 命名 prom.hf.<stage>.<tenant>,避免跨城运维误操作
-#   - 默认只透传,业务规则由各团队 PR 添加
+# topic 规划(写入目标):
+#     - prom.hf.routed.core         (team=core 核心业务)
+#     - prom.hf.routed.infra        (team=infra 基础设施)
+#     - prom.hf.routed.data         (team=data 数据平台)
+#     - prom.hf.routed.app_business (兜底,未命中规则的 app 业务数据)
+# ============================================================
 rulesets:
-  - name: hf-default
-    tenant: hf
-    default_topic: prom.hf.default
+  # ── app-business 租户规则集 ──
+  # 收到 remote_write 后同步处理:relabel + route,直接写入 routed topic
+  - name: app-business
+    tenant: app-business
+    default_topic: prom.hf.routed.app_business   # 路由未命中时的兜底 topic
     version: 1
-    stages: []
+    match:
+      metric_prefix: ""                         # 空 = 全量接收
+    stages:
+      # Stage 1: relabel - 标签清洗
+      - type: relabel
+        drop_labels:
+          - env                                 # 环境标签(噪音)
+          - instance                            # 实例标签(高基数,用 host 替代)
+          - pod                                 # Pod 名(高基数)
+        keep_labels: []                          # 空 = 关闭白名单
+        label_map:
+          kubernetes_io_cluster: cluster         # 重命名: kubernetes_io_cluster → cluster
+
+      # Stage 2: route - 按 team 标签分桶到不同 topic
+      - type: route
+        rules:
+          - match: { team: "core" }              # 核心业务团队(订单/支付/账户)
+            topic: prom.hf.routed.core
+          - match: { team: "infra" }              # 基础设施团队(主机/网络/监控)
+            topic: prom.hf.routed.infra
+          - match: { team: "data" }              # 数据平台团队(离线/实时计算)
+            topic: prom.hf.routed.data
+          # 未命中以上规则 → 写入 default_topic (prom.hf.routed.app_business)
+
+      # Stage 3: sample - 采样(降低下游存储压力)
+      - type: sample
+        rate: 0.1                                # 保留 10%,生产可按需调整
+
+  # ── infra 租户规则集 ──
+  # 基础设施指标通常不按 team 分桶,直接写入 routed.infra
+  - name: infra
+    tenant: infra
+    default_topic: prom.hf.routed.infra           # 写入的 topic
+    version: 1
+    match:
+      metric_prefix: ""
+    stages:
+      - type: relabel
+        drop_labels:
+          - env
+          - instance
+      # 无 route stage → 全部写入 default_topic (prom.hf.routed.infra)
+
+global:
+  rate_limit_per_instance: 100000                # 单实例全局 samples/s 上限
+  channel_buffer: 65535                           # 内部 channel 缓冲区大小

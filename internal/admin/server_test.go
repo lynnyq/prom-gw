@@ -47,8 +47,8 @@ func newMockService() *mockService {
 	return &mockService{
 		ruleSets: make(map[string]config.HistoryRecord),
 		tenants: []auth.Tenant{
-			{Name: "app-business", TenantID: "1001", DefaultTopic: "prom.raw.app_business", RateLimit: 80000},
-			{Name: "infra", TenantID: "1002", DefaultTopic: "prom.raw.infra", RateLimit: 50000},
+			{Name: "app-business", TenantID: "1001", DefaultTopic: "prom.routed.app_business", RateLimit: 80000},
+			{Name: "infra", TenantID: "1002", DefaultTopic: "prom.routed.infra", RateLimit: 50000},
 		},
 	}
 }

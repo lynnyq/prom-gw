@@ -6,18 +6,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=prom-gw
-Group=prom-gw
-# spec 9.1: 通过 systemd template 实例化,按城市分目录加载规则(spec 9.3)
-#   - prom-gw@bj.service -> /etc/prom-gw/config-bj.yaml
-#   - prom-gw@sz.service -> /etc/prom-gw/config-sz.yaml
-#   - prom-gw@hf.service -> /etc/prom-gw/config-hf.yaml
+User=bdops
+Group=bdops
+# 通过 systemd template 实例化,按城市加载独立配置
+#   - prom-gw@bj.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/bj/default.yaml)
+#   - prom-gw@sz.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/sz/default.yaml)
+#   - prom-gw@hf.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/hf/default.yaml)
 Environment=INGEST_CITY=%i
-Environment=PROM_GW_CONFIG=/etc/prom-gw/config-%i.yaml
-Environment=PROM_GW_TOKENS=/etc/prom-gw/tokens.yaml
-ExecStart=/opt/prom-gw/bin/prom-gw \
-  --config=/etc/prom-gw/config-%i.yaml \
-  --tokens=/etc/prom-gw/tokens.yaml \
+Environment=PROM_GW_CONFIG=/appdata/prom-gw/conf/rules.yaml
+Environment=PROM_GW_TOKENS=/appdata/prom-gw/conf/tokens.yaml
+ExecStart=/appdata/prom-gw/bin/prom-gw \
+  --config=/appdata/prom-gw/conf/rules.yaml \
+  --tokens=/appdata/prom-gw/conf/tokens.yaml \
   --ingest-city=%i
 Restart=always
 RestartSec=5

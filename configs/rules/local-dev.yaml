@@ -8,13 +8,11 @@
 #     --source-dc=dc-local-dev
 #
 # 前置:先创建 topic(参考 docs/operations/prom-gw-operations-guide.md §10)
-#   prom.local.raw.app_business / prom.local.raw.infra
 #   prom.local.routed.core / prom.local.routed.infra / prom.local.routed.data / prom.local.routed.app_business
 # ----------------------------------------------------------------------------
 rulesets:
   - name: app-business
     tenant: app-business
-    input_topic: prom.local.raw.app_business
     default_topic: prom.local.routed.app_business
     version: 1
     match:

@@ -38,7 +38,7 @@ func (s *stubAuth) Verify(_ context.Context, token string) (auth.Tenant, error) 
 func newTestServer(t *testing.T, h func(context.Context, []byte, []parser.Sample, string) error) *Server {
 	t.Helper()
 	a := &stubAuth{tokens: map[string]auth.Tenant{
-		"good": {Name: "t1", DefaultTopic: "prom.raw.t1", RateLimit: 100000},
+		"good": {Name: "t1", DefaultTopic: "prom.routed.t1", RateLimit: 100000},
 	}}
 	s, err := New(Config{
 		Authenticator: a,

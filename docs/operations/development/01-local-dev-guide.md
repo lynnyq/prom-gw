@@ -225,15 +225,7 @@ bin/kafka-console-consumer.sh \
 ```bash
 cd ~/kafka
 
-# 原始数据 topic
-for tenant in app_business infra; do
-  bin/kafka-topics.sh --bootstrap-server localhost:9092 \
-    --create --topic prom.local.raw.${tenant} \
-    --partitions 4 --replication-factor 1 \
-    --config retention.ms=86400000
-done
-
-# 路由后 topic
+# 数据 topic(按 team 分桶)
 for biz in core infra data app_business; do
   bin/kafka-topics.sh --bootstrap-server localhost:9092 \
     --create --topic prom.local.routed.${biz} \
@@ -392,17 +384,17 @@ tokens:
   "tk_app_business_dev":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.local.raw.app_business
+    default_topic: prom.local.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
     tenant: infra
     tenant_id: "1002"
-    default_topic: prom.local.raw.infra
+    default_topic: prom.local.routed.infra
     rate_limit: 50000
 ```
 
-> **注意**:本地开发的 `default_topic` 改为 `prom.local.raw.*`(与 §3.7 创建的 topic 匹配)。
+> **注意**:本地开发的 `default_topic` 改为 `prom.local.routed.*`(与 §3.7 创建的 topic 匹配)。
 
 ### 5.3 本地 Ruleset 配置
 
@@ -412,7 +404,6 @@ tokens:
 rulesets:
   - name: app-business
     tenant: app-business
-    input_topic: prom.local.raw.app_business
     default_topic: prom.local.routed.app_business
     version: 1
     match:
@@ -526,7 +517,7 @@ curl -s http://127.0.0.1:8080/metrics | grep gateway_samples_total
 # 8. Kafka 收到数据(消费验证)
 ~/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 \
-  --topic prom.local.raw.app_business \
+  --topic prom.local.routed.app_business \
   --from-beginning --max-messages 5 --timeout-ms 10000 | xxd | head -20
 
 # 9. Admin API
@@ -557,7 +548,7 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
 # 验证 Kafka 收到
 ~/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 \
-  --topic prom.local.raw.app_business \
+  --topic prom.local.routed.app_business \
   --from-beginning --max-messages 1 --timeout-ms 10000 | xxd | head
 ```
 
@@ -664,7 +655,7 @@ K=~/kafka/bin
 # 实时消费(持续)
 $K/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 \
-  --topic prom.local.raw.app_business \
+  --topic prom.local.routed.app_business \
   --from-beginning
 
 # 查看消费组
@@ -672,11 +663,11 @@ $K/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
 
 # 查看 Topic 分区详情
 $K/kafka-topics.sh --bootstrap-server localhost:9092 \
-  --describe --topic prom.local.raw.app_business
+  --describe --topic prom.local.routed.app_business
 
 # 查看 Topic 最新 offset
 $K/kafka-run-class.sh kafka.tools.GetOffsetShell \
-  --broker-list localhost:9092 --topic prom.local.raw.app_business
+  --broker-list localhost:9092 --topic prom.local.routed.app_business
 ```
 
 ### 7.6 热重载 Token
@@ -834,7 +825,7 @@ grep "WAL drained successfully" /tmp/prom-gw-drain.log
 # 9. 验证 Kafka 收到 drain 的数据
 ~/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server localhost:9092 \
-  --topic prom.local.raw.app_business \
+  --topic prom.local.routed.app_business \
   --from-beginning --max-messages 10 --timeout-ms 10000 | xxd | head
 
 # 清理
@@ -957,7 +948,7 @@ watch -n1 'curl -s http://127.0.0.1:8080/metrics | grep -E "gateway_samples_tota
 
 # 3. 观察 Kafka 入队速率
 ~/kafka/bin/kafka-run-class.sh kafka.tools.GetOffsetShell \
-  --broker-list localhost:9092 --topic prom.local.raw.app_business
+  --broker-list localhost:9092 --topic prom.local.routed.app_business
 
 # 清理
 kill $GW_PID

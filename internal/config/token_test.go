@@ -16,12 +16,12 @@ tokens:
   "tk_test_a":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.raw.app_business
+    default_topic: prom.routed.app_business
     rate_limit: 80000
   "tk_test_b":
     tenant: infra
     tenant_id: "1002"
-    default_topic: prom.raw.infra
+    default_topic: prom.routed.infra
     rate_limit: 50000
 `
 
@@ -48,7 +48,7 @@ func TestVerify_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "app-business", tenant.Name)
 	assert.Equal(t, "1001", tenant.TenantID)
-	assert.Equal(t, "prom.raw.app_business", tenant.DefaultTopic)
+	assert.Equal(t, "prom.routed.app_business", tenant.DefaultTopic)
 	assert.Equal(t, 80000, tenant.RateLimit)
 }
 
@@ -82,7 +82,7 @@ func TestReload_ReplacesTokens(t *testing.T) {
 tokens:
   "tk_test_c":
     tenant: app-new
-    default_topic: prom.raw.app_new
+    default_topic: prom.routed.app_new
     rate_limit: 1000
 `
 	require.NoError(t, os.WriteFile(path, []byte(updated), 0o600))
@@ -135,11 +135,11 @@ func TestTenantLimits_DeduplicatesTenant(t *testing.T) {
 tokens:
   "tk_a1":
     tenant: app
-    default_topic: prom.raw.app
+    default_topic: prom.routed.app
     rate_limit: 100
   "tk_a2":
     tenant: app
-    default_topic: prom.raw.app
+    default_topic: prom.routed.app
     rate_limit: 200
 `
 	a, _ := NewLocalTokenAuthenticator(writeTempTokens(t, yaml))
@@ -154,15 +154,15 @@ func TestTenantLimits_DeterministicOrder(t *testing.T) {
 tokens:
   "tk_zzz":
     tenant: app
-    default_topic: prom.raw.app
+    default_topic: prom.routed.app
     rate_limit: 999
   "tk_aaa":
     tenant: app
-    default_topic: prom.raw.app
+    default_topic: prom.routed.app
     rate_limit: 50
   "tk_mmm":
     tenant: other
-    default_topic: prom.raw.other
+    default_topic: prom.routed.other
     rate_limit: 300
 `
 	a, _ := NewLocalTokenAuthenticator(writeTempTokens(t, yaml))

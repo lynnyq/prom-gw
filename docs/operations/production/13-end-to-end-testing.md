@@ -157,7 +157,7 @@ done
 # 消费 Topic 验证数据到达
 /appdata/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server kafka-1:9092 \
-  --topic prom.bj.raw.app_business \
+  --topic prom.bj.routed.app_business \
   --from-beginning \
   --max-messages 10 \
   --timeout-ms 15000 \
@@ -338,14 +338,14 @@ bash test/manual/e2e.sh
 | 序号 | 验证项 | 命令 | 期望结果 |
 |---|---|---|---|
 | 1 | Kafka Broker 状态 | `kafka-broker-api-versions.sh --bootstrap-server kafka-1:9092` | 3 个 Broker 在线 |
-| 2 | Topic 列表 | `kafka-topics.sh --list --bootstrap-server kafka-1:9092 \| grep prom` | 包含 raw/routed topic |
+| 2 | Topic 列表 | `kafka-topics.sh --list --bootstrap-server kafka-1:9092 \| grep prom` | 包含 routed topic |
 | 3 | prom-gw healthz | `curl http://prom-gw:8081/healthz` | `{"status":"ok"}` |
 | 4 | prom-gw readyz | `curl -o /dev/null -w "%{http_code}" http://prom-gw:8081/readyz` | `204` |
 | 5 | prom-gw metrics | `curl http://prom-gw:8080/metrics \| grep gateway_samples_total` | 指标可见 |
 | 6 | Prometheus remote_write | `curl http://prom:9090/api/v1/query?query=prometheus_remote_storage_samples_total` | 计数递增 |
 | 7 | 写入 200 | `curl -w "%{http_code}" -X POST .../api/v1/write` | `200` |
 | 8 | 鉴权 401 | 无 token 写入 | `401` |
-| 9 | Kafka 消费 | `kafka-console-consumer.sh --topic prom.bj.raw.app_business` | 收到数据 |
+| 9 | Kafka 消费 | `kafka-console-consumer.sh --topic prom.bj.routed.app_business` | 收到数据 |
 | 10 | Admin API | `curl http://prom-gw:8082/v1/rulesets` | 返回 ruleset 列表 |
 | 11 | LVS VIP | `curl http://lvs-vip:19201/api/v1/write` | 可达 |
 | 12 | Grafana 大盘 | 打开 Grafana → prom-gw dashboard | 数据有曲线 |

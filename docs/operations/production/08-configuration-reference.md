@@ -331,7 +331,6 @@ global:
 |---|---|---|---|---|
 | `name` | string | ✓ | — | ruleset 唯一名,用于 Admin API 路径 |
 | `tenant` | string | 否 | `""` | 适用租户(多租户预留,v1 全局生效) |
-| `input_topic` | string | 否 | `""` | 输入 topic 标记(仅文档用,运行期不参与逻辑) |
 | `default_topic` | string | ✓ | — | 没路由命中时的兜底 topic |
 | `match` | object | 否 | `{}`(全量) | metric 命中条件 |
 | `stages` | array | 否 | `[]`(透传) | 处理阶段列表 |
@@ -541,19 +540,19 @@ tokens:
   "tk_app_business_dev":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.local.raw.app_business
+    default_topic: prom.local.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
     tenant: infra
     tenant_id: "1002"
-    default_topic: prom.local.raw.infra
+    default_topic: prom.local.routed.infra
     rate_limit: 50000
 
   "tk_prod_bj_payment":
     tenant: payment
     tenant_id: "2001"
-    default_topic: prom.bj.raw.payment
+    default_topic: prom.bj.routed.payment
     rate_limit: 200000
 ```
 
@@ -655,7 +654,6 @@ tenant rate limits reloaded tenants=3
 rulesets:
   - name: app-business
     tenant: app-business
-    input_topic: prom.local.raw.app_business
     default_topic: prom.local.routed.app_business
     version: 1
     match:
@@ -689,7 +687,7 @@ tokens:
   "tk_app_business_dev":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.local.raw.app_business
+    default_topic: prom.local.routed.app_business
     rate_limit: 80000
 ```
 
@@ -719,7 +717,6 @@ rulesets:
   # 1. app-business 业务指标
   - name: app-business-bj
     tenant: app-business
-    input_topic: prom.bj.raw.app_business
     default_topic: prom.bj.routed.app_business
     version: 7
     match:
@@ -755,7 +752,6 @@ rulesets:
   # 2. infra 基础设施指标(高保留)
   - name: infra-bj
     tenant: infra
-    input_topic: prom.bj.raw.infra
     default_topic: prom.bj.routed.infra
     version: 3
     match:
@@ -774,7 +770,6 @@ rulesets:
   # 3. 长期趋势指标(降采样)
   - name: longterm-bj
     tenant: app-business
-    input_topic: prom.bj.raw.app_business
     default_topic: prom.bj.agg5m.app_business
     version: 2
     match:
@@ -801,19 +796,19 @@ tokens:
   "tk_prod_bj_app_business_<secret>":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.bj.raw.app_business
+    default_topic: prom.bj.routed.app_business
     rate_limit: 200000
 
   "tk_prod_bj_infra_<secret>":
     tenant: infra
     tenant_id: "1002"
-    default_topic: prom.bj.raw.infra
+    default_topic: prom.bj.routed.infra
     rate_limit: 150000
 
   "tk_prod_bj_payment_<secret>":
     tenant: payment
     tenant_id: "2001"
-    default_topic: prom.bj.raw.payment
+    default_topic: prom.bj.routed.payment
     rate_limit: 100000
 ```
 

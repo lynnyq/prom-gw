@@ -139,7 +139,6 @@ jar tf target/flink-agg5m-starrocks-1.0.0.jar | grep PromProtos | head -5
 前置:已按 [prom-gw-operations-guide.md](../../docs/operations/prom-gw-operations-guide.md) 完成:
 1. Kafka(KRaft 模式)已启动,`config/local.properties` 配置正确
 2. prom-gw 已启动,topic 自动创建:
-   - `prom.local.raw.app_business`
    - `prom.local.routed.app_business`
 3. Prometheus 已启动并持续 remote_write 到 prom-gw
 4. Kafka 中已有路由后的数据(可用 `kafka-console-consumer.sh` 验证)

@@ -110,12 +110,12 @@
 - 描述：`NewNacosSDKClient` 构造 ServerConfig 时未设置 TLS 选项，Nacos 通信默认走明文 HTTP，凭据和配置明文传输。
 - 修复建议：在 `NacosConfig` 中增加 `TLSEnable bool` / `TLSConfig *tls.Config`，生产环境强制开启。
 
-### 7. Ansible systemd 模板缺失安全加固
+### 7. systemd 服务安全加固
 
-**[高] 7.1 Ansible 模板与 systemd 模板安全姿态不一致**
-- 位置：`deploy/ansible/roles/prom_gw/templates/prom-gw.service.j2`
-- 描述：完全缺失 `NoNewPrivileges`、`ProtectSystem`、`ProtectHome`、`PrivateTmp`、`PrivateDevices`、`ProtectKernelTunels`、`ProtectKernelModules`、`ProtectControlGroups`、`RestrictSUIDSGID`、`LockPersonality`、`RestrictRealtime`、`RestrictNamespaces`、`MemoryMax`、`TasksMax`、`ReadWritePaths` 等加固项。
-- 修复建议：将 `prom-gw@.service` 中的所有安全加固项同步到 `prom-gw.service.j2`，用变量参数化。
+**[高] 7.1 systemd 模板需补齐安全加固项**
+- 位置：`deploy/systemd/prom-gw@.service`
+- 描述：需确认包含 `NoNewPrivileges`、`ProtectSystem`、`ProtectHome`、`PrivateTmp`、`PrivateDevices`、`ProtectKernelTunels`、`ProtectKernelModules`、`ProtectControlGroups`、`RestrictSUIDSGID`、`LockPersonality`、`RestrictRealtime`、`RestrictNamespaces`、`MemoryMax`、`TasksMax`、`ReadWritePaths` 等加固项。
+- 修复建议：在 `prom-gw@.service` 中补齐上述安全加固项。
 
 ### 8. WAL 文件权限过宽
 
@@ -175,7 +175,7 @@
 | M-14 | OTLP Tracing 硬编码 `Insecure: true` | `cmd/prom-gw/main.go:99` |
 | M-15 | prom-gw@.service 允许 `LimitCORE=infinity`，core dump 可能含 Token | `deploy/systemd/prom-gw@.service:30` |
 | M-16 | 缺少 Capability 限制与 SystemCallFilter | `deploy/systemd/prom-gw@.service:45-58` |
-| M-17 | Ansible 未渲染/校验 Token 文件 | `deploy/ansible/roles/prom_gw/tasks/main.yml:38-54` |
+| M-17 | Token 文件需校验权限 | `configs/tokens/*.yaml`(部署到 `/appdata/prom-gw/conf/tokens.yaml`) |
 
 ### 依赖与并发
 
@@ -212,7 +212,7 @@
 | L-14 | 自定义 readAll 用字符串比较检测 EOF | `internal/receiver/server.go:403-419` |
 | L-15 | decoder.Decode 无独立 panic recovery | `internal/decoder/decoder.go:49-74` |
 | L-16 | 测试代码中硬编码 Token 字面量 | `internal/config/token_test.go:14-26` |
-| L-17 | group_vars 与 env.j2 无硬编码密钥（良好） | `deploy/ansible/inventory/group_vars/all.yml` |
+| L-17 | token 配置文件无硬编码密钥(良好) | `configs/tokens/*.yaml` |
 | L-18 | 鉴权失败日志不含 Token（良好） | `internal/receiver/server.go:193-196` |
 | L-19 | Admin API 不返回 Token 明文（良好） | `internal/config/token.go:120-138` |
 | L-20 | pipeline.go buffer 交换逻辑空 slice index 风险（被 recover 兜底） | `internal/ruleengine/pipeline.go:174,182` |
@@ -259,7 +259,7 @@
 
 13. kafkasink 增加 SASL/SSL 支持
 14. Nacos 通信启用 TLS
-15. Ansible systemd 模板补齐安全加固项
+15. systemd 服务模板补齐安全加固项
 16. Token 过期机制 + 审计日志
 17. mTLS 支持
 18. golangci.yml 增加 bodyclose/depguard/noctx linter
@@ -283,7 +283,7 @@
 - [ ] P1-12: Kafka topic 正则校验
 - [ ] P2-13: kafkasink SASL/SSL
 - [ ] P2-14: Nacos TLS
-- [ ] P2-15: Ansible systemd 加固
+- [ ] P2-15: systemd 服务加固
 - [ ] P2-16: Token 过期 + 审计日志
 - [ ] P2-17: mTLS 支持
 - [ ] P2-18: golangci.yml linter 补充

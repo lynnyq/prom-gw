@@ -5,11 +5,11 @@ tokens:
   "tk_app_business_dev":
     tenant: app-business
     tenant_id: "1001"
-    default_topic: prom.raw.app_business
+    default_topic: prom.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
     tenant: infra
     tenant_id: "1002"
-    default_topic: prom.raw.infra
+    default_topic: prom.routed.infra
     rate_limit: 50000

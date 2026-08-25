@@ -152,7 +152,7 @@ Flink 必须从 header 提取这些字段写入 StarRocks,不能从 payload 解�
 
 | 环境 | 原始 topic | 路由后 topic |
 |---|---|---|
-| 本地 | `prom.local.raw.<tenant>` | `prom.local.routed.<biz>` |
+| 本地 | `prom.local.routed.<tenant>` | `prom.local.routed.<biz>` |
 | 生产 | `prom.<city>.raw.<tenant>` | `prom.<city>.routed.<biz>` 或 `prom.<city>.cleaned.<biz>` |
 
 Flink 通常消费 **路由后(cleaned/routed)的 topic**,因为这些数据已经过 relabel/route 清洗。若要消费原始数据,订阅 raw topic。
