@@ -15,6 +15,9 @@ class JobConfigTest {
         assertThat(cfg.kafkaStartFrom).isEqualTo("committed");
         assertThat(cfg.kafkaOffsetReset).isEqualTo("latest");
         assertThat(cfg.kafkaStartTimestamp).isEqualTo(0L);
+        // StarRocks batch defaults
+        assertThat(cfg.srBatchSize).isEqualTo(500);
+        assertThat(cfg.srBatchIntervalMs).isEqualTo(10_000L);
     }
 
     @Test
@@ -71,5 +74,30 @@ class JobConfigTest {
         String str = cfg.toString();
         assertThat(str).contains("kafkaStartFrom='earliest'");
         assertThat(str).contains("kafkaOffsetReset='latest'");
+    }
+
+    // --- StarRocks batch 参数解析 ---
+
+    @Test
+    void testParseBatchSize() {
+        JobConfig cfg = JobConfig.fromArgs(new String[]{"--sr-batch-size", "1000"});
+        assertThat(cfg.srBatchSize).isEqualTo(1000);
+    }
+
+    @Test
+    void testParseBatchIntervalMs() {
+        JobConfig cfg = JobConfig.fromArgs(new String[]{"--sr-batch-interval-ms", "5000"});
+        assertThat(cfg.srBatchIntervalMs).isEqualTo(5000L);
+    }
+
+    @Test
+    void testToStringContainsBatchInfo() {
+        JobConfig cfg = JobConfig.fromArgs(new String[]{
+                "--sr-batch-size", "200",
+                "--sr-batch-interval-ms", "3000"
+        });
+        String str = cfg.toString();
+        assertThat(str).contains("srBatchSize=200");
+        assertThat(str).contains("srBatchIntervalMs=3000");
     }
 }

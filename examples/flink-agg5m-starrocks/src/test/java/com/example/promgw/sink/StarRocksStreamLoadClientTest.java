@@ -82,7 +82,7 @@ class StarRocksStreamLoadClientTest {
                 lastBeAuth = exchange.getRequestHeaders().getFirst("Authorization");
                 lastBeBody = new String(exchange.getRequestBody().readAllBytes(),
                         StandardCharsets.UTF_8);
-                String resp = "{\"Status\":\"OK\",\"NumberTotalRows\":1}";
+                String resp = "{\"Status\":\"Success\",\"NumberTotalRows\":1}";
                 byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, respBytes.length);
                 exchange.getResponseBody().write(respBytes);
@@ -108,7 +108,7 @@ class StarRocksStreamLoadClientTest {
         // Authorization 头正确转发到 BE
         assertThat(lastBeAuth).startsWith("Basic ");
         // 返回 BE 的响应
-        assertThat(result).contains("\"Status\":\"OK\"");
+        assertThat(result).contains("\"Status\":\"Success\"");
     }
 
     @Test
@@ -173,7 +173,7 @@ class StarRocksStreamLoadClientTest {
             public void handle(HttpExchange exchange) throws IOException {
                 // 消费请求体
                 exchange.getRequestBody().readAllBytes();
-                String resp = "{\"Status\":\"OK\"}";
+                String resp = "{\"Status\":\"Success\"}";
                 byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, respBytes.length);
                 exchange.getResponseBody().write(respBytes);
@@ -188,7 +188,7 @@ class StarRocksStreamLoadClientTest {
 
         String result = client.load("test_label_004", "{\"metric\":\"up\",\"value\":1.0}", true);
 
-        assertThat(result).contains("\"Status\":\"OK\"");
+        assertThat(result).contains("\"Status\":\"Success\"");
     }
 
     @Test
@@ -223,7 +223,7 @@ class StarRocksStreamLoadClientTest {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
-                String resp = "{\"Status\":\"OK\",\"NumberTotalRows\":5}";
+                String resp = "{\"Status\":\"Success\",\"NumberTotalRows\":5}";
                 byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(200, respBytes.length);
                 exchange.getResponseBody().write(respBytes);
@@ -237,8 +237,83 @@ class StarRocksStreamLoadClientTest {
 
         String result = client.load("test_label_006", "{\"metric\":\"up\"}", false);
 
-        assertThat(result).contains("\"Status\":\"OK\"");
+        assertThat(result).contains("\"Status\":\"Success\"");
         // BE 不应被命中
         assertThat(beHitCount.get()).isEqualTo(0);
+    }
+
+    // --- 响应校验(回归:load 不校验 Status 字段导致静默丢数) ---
+
+    @Test
+    void testThrowsOnFailStatus() throws Exception {
+        // StarRocks 返回 HTTP 200 但 Status=Fail(数据被拒绝)
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "{\"Status\":\"Fail\",\"Message\":\"schema mismatch\"}";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        assertThatThrownBy(() -> client.load("test_label_fail", "{}", false))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Status=Fail")
+                .hasMessageContaining("schema mismatch");
+    }
+
+    @Test
+    void testThrowsOnPublishTimeout() throws Exception {
+        // StarRocks 返回 HTTP 200 但 Status=Publish Timeout(数据可能不可见)
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "{\"Status\":\"Publish Timeout\",\"Message\":\"publish timeout\"}";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        assertThatThrownBy(() -> client.load("test_label_timeout", "{}", false))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("Publish Timeout");
+    }
+
+    @Test
+    void testPartialLoadLogsWarningButSucceeds() throws Exception {
+        // 部分行被质量过滤丢弃(正常行为),Status=Success 但 loaded < total
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "{\"Status\":\"Success\",\"NumberTotalRows\":100,\"NumberLoadedRows\":95,\"NumberFilteredRows\":5}";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        // 部分加载不抛异常(质量过滤是正常行为)
+        String result = client.load("test_label_partial", "{}", false);
+        assertThat(result).contains("\"Status\":\"Success\"");
     }
 }

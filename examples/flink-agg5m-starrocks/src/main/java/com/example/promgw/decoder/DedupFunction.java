@@ -6,6 +6,7 @@ import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
@@ -32,6 +33,7 @@ public class DedupFunction extends KeyedProcessFunction<Integer, KafkaRecord, Pr
     private static final long DEDUP_WINDOW_MS = 60_000L;
 
     private transient ValueState<Long> lastProcessedTs;
+    private transient Counter decodeFailures;
     private final PromWriteRequestDecoder decoder = new PromWriteRequestDecoder();
 
     @Override
@@ -39,6 +41,8 @@ public class DedupFunction extends KeyedProcessFunction<Integer, KafkaRecord, Pr
         ValueStateDescriptor<Long> desc = new ValueStateDescriptor<>(
                 "lastProcessedTs", Types.LONG);
         lastProcessedTs = getRuntimeContext().getState(desc);
+        decodeFailures = getRuntimeContext().getMetricGroup()
+                .addGroup("promgw").counter("decodeFailures");
     }
 
     @Override
@@ -65,6 +69,9 @@ public class DedupFunction extends KeyedProcessFunction<Integer, KafkaRecord, Pr
         try {
             sample = decoder.decode(record.getValue(), record.getHeaders());
         } catch (Exception e) {
+            // 修复前:只记 LOG.warn,decode 失败不可见 → 无法告警。
+            // 修复后:增加 Flink counter,可在 metric dashboard 上告警 decode 失败率。
+            decodeFailures.inc();
             LOG.warn("decode failed, skipping: topic={}, offset={}, err={}",
                     record.getTopic(), record.getOffset(), e.getMessage());
             return;

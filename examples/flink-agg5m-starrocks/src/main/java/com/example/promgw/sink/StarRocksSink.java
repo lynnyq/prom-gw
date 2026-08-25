@@ -130,12 +130,20 @@ public class StarRocksSink extends RichSinkFunction<AggResult> {
         return mapper.writeValueAsString(m);
     }
 
-    /** buildLabel 生成全局唯一 label,格式:<prefix>_<yyyyMMddHHmm>_<business>_<hashShort>。 */
-    private String buildLabel(AggResult r) {
+    /**
+     * buildLabel 生成全局唯一 label,格式:<prefix>_<yyyyMMddHHmm>_<business>_<labelsHash>。
+     *
+     * label 必须在同窗口内对不同 series 唯一,否则 StarRocks 会按 label 幂等去重,
+     * 导致同 label 的第二个 Stream Load 被拒绝 → 静默丢数。
+     * 使用完整 16 字符 labels_hash(64-bit SHA-1)而非截断前 8 字符(32-bit),
+     * 将同 business 内碰撞概率从 ~N²/2³³ 降至 ~N²/2⁶³(N=series 数)。
+     */
+    /** buildLabel 生成全局唯一 label(package-private 便于测试)。 */
+    String buildLabel(AggResult r) {
         String ts = labelFmt.format(r.getTs());
-        String hashShort = r.getLabelsHash() != null && r.getLabelsHash().length() >= 8
-                ? r.getLabelsHash().substring(0, 8) : "00000000";
-        return String.format("%s_%s_%s_%s", labelPrefix, ts, r.getBusiness(), hashShort);
+        String hash = r.getLabelsHash() != null && !r.getLabelsHash().isEmpty()
+                ? r.getLabelsHash() : "0000000000000000";
+        return String.format("%s_%s_%s_%s", labelPrefix, ts, r.getBusiness(), hash);
     }
 
     private void sendToDlq(AggResult result, String label, String error) throws Exception {

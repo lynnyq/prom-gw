@@ -12,7 +12,7 @@ import com.example.promgw.decoder.PromSample;
 import com.example.promgw.decoder.PromWriteRequestDecoder;
 import com.example.promgw.dlq.KafkaDlqHandler;
 import com.example.promgw.sink.DlqHandler;
-import com.example.promgw.sink.StarRocksSink;
+import com.example.promgw.sink.BufferingStarRocksSink;
 import com.example.promgw.util.LabelsHasher;
 import java.time.Duration;
 import java.util.Properties;
@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
  *     → keyBy(seriesKey) + 5min tumbling window
  *     → MetricAggFunction(sum/count/max/min/p50/p99)
  *     → AggWindowFunction(组装 AggResult)
- *     → StarRocksSink(Stream Load 写入北京 StarRocks)
+ *     → BufferingStarRocksSink(攒批 Stream Load 写入北京 StarRocks)
  *
  * 用法:
  *   本地: java -jar flink-agg5m-starrocks-1.0.0.jar --env local
@@ -110,11 +110,12 @@ public class Agg5mJob {
                 ? new KafkaDlqHandler(cfg.dlqBootstrapServers, cfg.dlqTopic)
                 : null;
 
-        aggStream.addSink(new StarRocksSink(
+        aggStream.addSink(new BufferingStarRocksSink(
                 cfg.srHost, cfg.srPort, cfg.srDb, cfg.srTable,
                 cfg.srUser, cfg.srPassword, cfg.srGzip,
-                cfg.srLabelPrefix, dlqHandler
-        )).name("starrocks-stream-load");
+                cfg.srLabelPrefix, dlqHandler,
+                cfg.srBatchSize, cfg.srBatchIntervalMs
+        )).name("starrocks-stream-load-batch");
 
         // 9. 执行
         env.execute("flink-agg5m-" + cfg.env);

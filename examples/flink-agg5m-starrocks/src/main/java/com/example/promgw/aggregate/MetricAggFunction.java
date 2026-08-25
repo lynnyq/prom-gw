@@ -47,7 +47,6 @@ public class MetricAggFunction implements AggregateFunction<SampleWithMeta, Metr
         // 计算 p50/p99(桶内排序精确计算)
         if (!acc.samples.isEmpty()) {
             Collections.sort(acc.samples);
-            acc.sum = acc.sum; // 保持原值,avg 在 window function 算
         }
         return acc;
     }

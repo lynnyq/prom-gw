@@ -50,14 +50,18 @@ public class KafkaDlqHandler implements DlqHandler {
         // 用 label 作 key,保证同 label 重试落同 partition
         ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(
                 dlqTopic, label.getBytes(StandardCharsets.UTF_8), value);
-        producer.send(record, (metadata, e) -> {
-            if (e != null) {
-                LOG.error("DLQ send failed: label={}", label, e);
-            } else {
-                LOG.warn("DLQ sent: label={}, topic={}, partition={}, offset={}",
-                        label, metadata.topic(), metadata.partition(), metadata.offset());
-            }
-        });
+        // 同步发送:等待 broker ack 后再返回。
+        // 修复前使用异步 callback,send() 立即返回 → StarRocksSink.invoke 认为 DLQ 成功 →
+        // checkpoint 推进 → Kafka ack 实际失败 → 数据静默丢失(只记 LOG.error)。
+        // 修复后 .get() 阻塞等待 ack,失败抛 Exception → 由 StarRocksSink.invoke 传播到 Flink →
+        // 触发 task 从 last checkpoint 重启,保证 at-least-once 语义。
+        try {
+            producer.send(record).get();
+            LOG.warn("DLQ sent: label={}, topic={}", label, dlqTopic);
+        } catch (Exception e) {
+            LOG.error("DLQ send failed, propagating to ensure at-least-once: label={}", label, e);
+            throw e;
+        }
     }
 
     @Override

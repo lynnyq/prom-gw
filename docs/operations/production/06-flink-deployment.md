@@ -488,6 +488,8 @@ scp target/flink-agg5m-starrocks-1.0.0.jar jm-1:/appdata/flink/jobs/
   --label-prefix sz_5m \
   --dlq-topic prom.sz.dlq.sr.5m \
   --dlq-enabled true \
+  --sr-batch-size 500 \
+  --sr-batch-interval-ms 10000 \
   --source-parallelism 24 \
   --agg-parallelism 24 \
   --window-minutes 5 \
@@ -676,6 +678,10 @@ scrape_configs:
 | Kafka Consumer Lag | `flink_taskmanager_job_task_KafkaSource_records_lag_max` | > 10000 |
 | TM 内存使用 | `flink_taskmanager_Status_JVM_Memory_Direct_MemoryUsed` | > 80% |
 | GC 暂停 | `flink_taskmanager_Status_JVM_GarbageCollector_TotalTime` | > 500ms |
+| SR 批量 flush 成功 | `flink_taskmanager_job_task_promgw_srFlushSuccess` | - |
+| SR 批量 flush 失败 | `flink_taskmanager_job_task_promgw_srFlushFailure` | > 0 |
+| SR DLQ 行数 | `flink_taskmanager_job_task_promgw_srDlqRows` | > 0 告警 |
+| Decode 失败 | `flink_taskmanager_job_task_promgw_decodeFailures` | > 0 告警 |
 
 ### 8.4 告警规则
 
@@ -738,6 +744,33 @@ groups:
           severity: critical
         annotations:
           summary: "Flink TaskManager 宕机"
+
+      # StarRocks Stream Load flush 失败
+      - alert: StarRocksFlushFailure
+        expr: increase(flink_taskmanager_job_task_promgw_srFlushFailure[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "StarRocks Stream Load 批量写入失败,数据已进入 DLQ"
+
+      # DLQ 行数增长(StarRocks 持续不可用)
+      - alert: StarRocksDlqRowsIncreasing
+        expr: increase(flink_taskmanager_job_task_promgw_srDlqRows[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "StarRocks DLQ 行数持续增长,检查 StarRocks 可用性"
+
+      # Decode 失败(Kafka 消息格式异常)
+      - alert: FlinkDecodeFailures
+        expr: increase(flink_taskmanager_job_task_promgw_decodeFailures[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Flink Kafka 消息解码失败,检查 prom-gw 编码格式"
 ```
 
 ### 8.5 Grafana Dashboard
@@ -758,7 +791,7 @@ groups:
 | Kafka Source | = partition 数 | 1:1 消费,确保吞吐 |
 | Dedup + Decode | = source 并行度 | 同链路 |
 | 窗口聚合 | = source 并行度 | 避免 shuffle |
-| StarRocks Sink | = source 并行度 / 2 | Stream Load 批量,不需高并行度 |
+| StarRocks Sink | = source 并行度 / 2 | 攒批 Stream Load(BufferingStarRocksSink),每 subtask 独立攒批 |
 
 ```bash
 # 命令行指定各阶段并行度(在 Agg5mJob 代码中已支持)
@@ -797,6 +830,8 @@ taskmanager.network.memory.buffers-per-channel: 4  # 每 channel 缓冲区数
 | `--checkpoint-interval-ms` | 60000 | 30000-120000 | 太短影响吞吐,太长影响恢复 |
 | `--source-parallelism` | 4 | = partition 数 | 确保 1:1 消费 |
 | `--agg-parallelism` | 4 | = source 并行度 | 避免 shuffle |
+| `--sr-batch-size` | 500 | 200-2000 | 攒批行数上限,达到即 flush。越大 HTTP 请求数越少,但内存占用越高 |
+| `--sr-batch-interval-ms` | 10000 | 5000-30000 | 攒批时间上限(ms),超时即 flush。确保 5min 窗口数据在下次窗口触发前写入 |
 
 ### 9.5 JVM 调优
 
@@ -890,7 +925,8 @@ curl -s http://jm-1:8081/jobs/<job-id>/vertices/<vertex-id>/watermarks | python3
 | 消费 lag 持续增大 | 查看 TM 指标,检查 Backpressure | 扩 partition / 扩 TM / 调整并行度 |
 | Checkpoint 超时 | 查看 state 大小,RocksDB IOPS | 增大 managed memory / 用 SSD / 增大 checkpoint timeout |
 | Checkpoint 失败 | 查看异常日志 | 检查 HDFS 连通性 / 磁盘空间 |
-| StarRocks 写入失败 | 查看 Sink 异常日志 | 检查 FE VIP 可达性 / Label 冲突 / BE 压力 |
+| StarRocks 写入失败 | 查看 Sink 异常日志,检查 `srFlushFailure` / `srDlqRows` 指标 | 检查 FE VIP 可达性 / Label 冲突 / BE 压力 / DLQ Kafka 可达性 |
+| 攒批延迟过高 | 查看 `srFlushSuccess` 速率与 buffer 大小 | 调小 `--sr-batch-size` 或 `--sr-batch-interval-ms` |
 | JM 内存不足 | 查看 JM 日志,GC 情况 | 增大 JM 内存 / 减少作业数 |
 | TM OOM | 查看 TM 日志 | 增大 task.heap / 减少 slot 数 / 优化 state |
 
@@ -960,9 +996,11 @@ curl -s http://jm-1:8081/jobs/<job-id>/checkpoints | python3 -m json.tool
 | `--starrocks-table` | `sr_bj_metrics_5m` | StarRocks 表名 |
 | `--starrocks-user` | `root` | StarRocks 用户名 |
 | `--starrocks-password` | (空) | StarRocks 密码 |
-| `--label-prefix` | `local_5m` | Stream Load label 前缀 |
+| `--label-prefix` | `local_5m` | Stream Load label 前缀(每城唯一) |
 | `--dlq-topic` | `prom.local.dlq.sr.5m` | DLQ Kafka topic |
 | `--dlq-enabled` | `true` | 是否启用 DLQ |
+| `--sr-batch-size` | `500` | StarRocks 攒批行数上限,达到即 flush |
+| `--sr-batch-interval-ms` | `10000` | StarRocks 攒批时间上限(ms),超时即 flush |
 | `--source-parallelism` | `4` | Kafka Source 并行度 |
 | `--agg-parallelism` | `4` | 窗口聚合并行度 |
 | `--window-minutes` | `5` | 窗口大小(分钟) |

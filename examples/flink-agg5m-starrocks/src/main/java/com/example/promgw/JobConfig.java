@@ -39,6 +39,9 @@ public class JobConfig {
     public String srPassword = "";
     public boolean srGzip = true;
     public String srLabelPrefix = "local_5m";
+    // StarRocks 攒批配置
+    public int srBatchSize = 500;               // 攒批行数上限,达到即 flush
+    public long srBatchIntervalMs = 10_000L;    // 攒批时间上限(ms),超时即 flush
 
     // DLQ
     public String dlqBootstrapServers = "localhost:9092";
@@ -91,6 +94,12 @@ public class JobConfig {
                     break;
                 case "--label-prefix":
                     cfg.srLabelPrefix = next(args, ++i);
+                    break;
+                case "--sr-batch-size":
+                    cfg.srBatchSize = Integer.parseInt(next(args, ++i));
+                    break;
+                case "--sr-batch-interval-ms":
+                    cfg.srBatchIntervalMs = Long.parseLong(next(args, ++i));
                     break;
                 case "--dlq-topic":
                     cfg.dlqTopic = next(args, ++i);
@@ -150,7 +159,9 @@ public class JobConfig {
     public String toString() {
         return "JobConfig{env='" + env + "', kafkaBrokers='" + kafkaBrokers
                 + "', topic='" + kafkaTopic + "', srHost='" + srHost + ":" + srPort
-                + "', srTable='" + srDb + "." + srTable + "', dlqTopic='" + dlqTopic
+                + "', srTable='" + srDb + "." + srTable + "', srBatchSize=" + srBatchSize
+                + ", srBatchIntervalMs=" + srBatchIntervalMs
+                + "', dlqTopic='" + dlqTopic
                 + "', windowMinutes=" + windowMinutes
                 + ", kafkaStartFrom='" + kafkaStartFrom
                 + "', kafkaOffsetReset='" + kafkaOffsetReset

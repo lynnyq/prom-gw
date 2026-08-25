@@ -393,13 +393,14 @@ flink-agg5m-starrocks/
     │   ├── MetricAggState.java            # 状态定义
     │   └── AggResult.java                # 聚合输出 POJO
     ├── sink/
-    │   ├── StarRocksSink.java            # Stream Load 写入
-    │   └── StarRocksStreamLoadClient.java # HTTP 客户端
+    │   ├── BufferingStarRocksSink.java   # 攒批 Stream Load 写入(checkpoint 集成)
+    │   ├── StarRocksSink.java            # 单行 Stream Load(已被 Buffering 替代,保留兜底)
+    │   └── StarRocksStreamLoadClient.java # HTTP 客户端(含响应校验)
     ├── util/
     │   ├── LabelsHasher.java             # XXH3 labels hash
     │   └── HeaderExtractor.java          # Kafka header 提取
     └── dlq/
-        └── DlqSink.java                 # 失败消息写回 Kafka
+        └── KafkaDlqHandler.java          # 失败消息同步写回 Kafka DLQ
 ```
 
 ---
@@ -820,10 +821,13 @@ public class AggWindowFunction
 
 | 方案 | 实现 | 适用 |
 |---|---|---|
-| **官方 connector** | `flink-connector-starrocks` | 推荐,自动批量 + 重试 + at-least-once |
-| 手写 HTTP | 直接调 `http://<fe-vip>:8030/api/<db>/<table>/_stream_load` | 精细控制场景 |
+| **BufferingStarRocksSink(推荐)** | 攒批 + checkpoint 集成 + DLQ,见 [§9.3](#93-攒批-stream-loadbufferingstarrockssink推荐) | **生产默认**,单 HTTP 请求写 N 行,吞吐高、HTTP 请求数低 |
+| 官方 connector | `flink-connector-starrocks` | 不想维护 sink 代码时备选,但 label/重试/DLQ 控制力弱 |
+| StarRocksSink(兜底) | 单行 Stream Load,见 [sink/StarRocksSink.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/sink/StarRocksSink.java) | 调试/单条精细控制,生产已被 Buffering 替代 |
 
-### 9.2 官方 connector 配置
+> **推荐选 BufferingStarRocksSink**:5min 窗口单城 ≈ 1000 万 series 时,单行 sink 会产生 10K 次 HTTP 请求,攒批后(batchSize=500)降至 20 次,FE/BE 压力大幅降低。
+
+### 9.2 官方 connector 配置(备选)
 
 ```java
 import com.starrocks.connector.flink.StarRocksSink;
@@ -853,99 +857,232 @@ StarRocksSinkOptions options = StarRocksSinkOptions.builder()
 aggStream.addSink(StarRocksSink.sink(options));
 ```
 
-### 9.3 手写 Stream Load(精细控制场景)
+> 若使用官方 connector,`Agg5mJob` 中应改用上面的 sink,不再构造 `BufferingStarRocksSink`。
+
+### 9.3 攒批 Stream Load(BufferingStarRocksSink,推荐)
+
+**核心思路**:把窗口输出的 `AggResult` 在 sink 端攒批,N 条合并成单个 JSON 数组,一次 HTTP PUT 提交到 StarRocks。flush 由三种条件触发:
+
+| 触发条件 | 参数 | 默认 | 说明 |
+|---|---|---|---|
+| 行数达上限 | `--sr-batch-size` | 500 | buffer.size() ≥ batchSize → flush |
+| 时间达上限 | `--sr-batch-interval-ms` | 10000 | 距上次 flush 超过此值 → flush |
+| checkpoint | (自动) | — | snapshotState 强制 flush,保证 at-least-once |
+
+**容错语义**:实现 `CheckpointedFunction`,checkpoint 前 flush,buffer 状态存入 `ListState`;重启后从 state 恢复未 flush 的行;flush 失败 → 抛异常 → checkpoint 失败 → 从 last checkpoint 重启。
+
+**作业接入**(见 [Agg5mJob.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/Agg5mJob.java)):
 
 ```java
-package com.example.promgw.sink;
+DlqHandler dlqHandler = cfg.dlqEnabled
+        ? new KafkaDlqHandler(cfg.dlqBootstrapServers, cfg.dlqTopic)
+        : null;
 
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.entity.StringEntity;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.impl.client.HttpClients;
-import org.apache.http.util.EntityUtils;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+aggStream.addSink(new BufferingStarRocksSink(
+        cfg.srHost, cfg.srPort, cfg.srDb, cfg.srTable,
+        cfg.srUser, cfg.srPassword, cfg.srGzip,
+        cfg.srLabelPrefix, dlqHandler,
+        cfg.srBatchSize, cfg.srBatchIntervalMs
+)).name("starrocks-stream-load-batch");
+```
 
-/**
- * StarRocksStreamLoadClient
- *
- * Stream Load 接口:HTTP PUT 到 /api/<db>/<table>/_stream_load
- * - Label 必须全局唯一(同 label 重试会幂等去重)
- * - 支持 gzip 压缩(Content-Encoding: gzip),跨城带宽减半
- * - PK 模型表用 MERGE 模式,自动按主键去重
- */
-public class StarRocksStreamLoadClient {
+**核心实现**(见 [sink/BufferingStarRocksSink.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/sink/BufferingStarRocksSink.java),关键片段):
 
-    private static final Logger LOG = LoggerFactory.getLogger(StarRocksStreamLoadClient.class);
+```java
+public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
+        implements CheckpointedFunction {
 
-    private final String loadUrl;
-    private final String user;
-    private final String password;
+    private static final int MAX_RETRY = 3;
+    private static final long BASE_BACKOFF_MS = 1000L;
 
-    public StarRocksStreamLoadClient(String feVip, int port,
-                                      String db, String table,
-                                      String user, String password) {
-        this.loadUrl = String.format("http://%s:%d/api/%s/%s/_stream_load",
-            feVip, port, db, table);
-        this.user = user;
-        this.password = password;
+    // 运行时状态
+    private transient StarRocksStreamLoadClient client;
+    private transient List<AggResult> buffer;
+    private transient long lastFlushTime;
+    private transient long batchSeq;
+    private transient int taskIndex;
+    private transient Counter flushSuccessCounter;
+    private transient Counter flushFailureCounter;
+    private transient Counter dlqRowsCounter;
+
+    // checkpoint state
+    private transient ListState<AggResult> checkpointBuffer;
+
+    @Override
+    public void invoke(AggResult result, Context context) throws Exception {
+        buffer.add(result);
+
+        boolean sizeReached = buffer.size() >= batchSize;
+        boolean timeElapsed = (System.currentTimeMillis() - lastFlushTime) >= batchIntervalMs;
+
+        if (sizeReached || timeElapsed) {
+            flush();
+        }
     }
 
-    public String load(String label, String jsonBody, boolean gzip) throws Exception {
-        try (CloseableHttpClient client = HttpClients.createDefault()) {
-            HttpPut put = new HttpPut(loadUrl);
-            put.setHeader("Authorization", basicAuth(user, password));
-            put.setHeader("Label", label);
-            put.setHeader("Format", "json");
-            put.setHeader("strip_outer_array", "true");
-            put.setHeader("Expect", "100-continue");
+    /**
+     * flush:把 buffer 中所有行作为单个 JSON 数组提交到 StarRocks。
+     * 失败处理:重试 MAX_RETRY 次(指数退避 1s/2s/4s)→ 最终失败按行发 DLQ。
+     */
+    private void flush() throws Exception {
+        if (buffer.isEmpty()) return;
 
-            byte[] body = jsonBody.getBytes(StandardCharsets.UTF_8);
-            if (gzip) {
-                body = gzipCompress(body);
-                put.setHeader("Content-Encoding", "gzip");
-            }
-            put.setEntity(new ByteArrayEntity(body));
+        // 构建 JSON 数组:[{...},{...},...]
+        StringBuilder sb = new StringBuilder(buffer.size() * 256);
+        sb.append("[");
+        for (int i = 0; i < buffer.size(); i++) {
+            if (i > 0) sb.append(",");
+            sb.append(toJson(buffer.get(i)));
+        }
+        sb.append("]");
+        String json = sb.toString();
 
-            return client.execute(put, resp -> {
-                String result = EntityUtils.toString(resp.getEntity());
-                int code = resp.getStatusLine().getStatusCode();
-                if (code != 200) {
-                    throw new IOException("Stream Load failed: HTTP " + code + ", " + result);
+        String label = buildBatchLabel();  // 全局唯一 batch label
+        int rowCount = buffer.size();
+
+        for (int attempt = 0; attempt <= MAX_RETRY; attempt++) {
+            try {
+                client.load(label, json, gzip);  // 复用 HttpClient,自动处理 307 + 响应校验
+                flushSuccessCounter.inc();
+                buffer.clear();
+                lastFlushTime = System.currentTimeMillis();
+                return;
+            } catch (Exception e) {
+                if (attempt < MAX_RETRY) {
+                    Thread.sleep(BASE_BACKOFF_MS * (1L << attempt));
+                } else {
+                    flushFailureCounter.inc();
+                    sendRowsToDlq(e.getMessage());  // 按行发 DLQ(同步 send)
+                    buffer.clear();
+                    lastFlushTime = System.currentTimeMillis();
+                    return;
                 }
-                return result;
-            });
+            }
         }
     }
 
-    private String basicAuth(String user, String pwd) {
-        String token = user + ":" + pwd;
-        return "Basic " + Base64.getEncoder().encodeToString(token.getBytes());
+    // --- CheckpointedFunction ---
+
+    @Override
+    public void snapshotState(FunctionSnapshotContext context) throws Exception {
+        flush();                // checkpoint 前强制 flush
+        checkpointBuffer.clear();
+        for (AggResult r : buffer) {  // flush 后通常为空
+            checkpointBuffer.add(r);
+        }
     }
 
-    private byte[] gzipCompress(byte[] data) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (GZIPOutputStream gz = new GZIPOutputStream(bos)) {
-            gz.write(data);
+    @Override
+    public void initializeState(FunctionInitializationContext context) throws Exception {
+        ListStateDescriptor<AggResult> desc = new ListStateDescriptor<>(
+                "bufferingStarRocksSinkBuffer", TypeInformation.of(AggResult.class));
+        checkpointBuffer = context.getOperatorStateStore().getListState(desc);
+        buffer = new ArrayList<>(batchSize);
+        if (context.isRestored()) {  // 从 checkpoint 恢复未 flush 的行
+            for (AggResult r : checkpointBuffer.get()) {
+                buffer.add(r);
+            }
         }
-        return bos.toByteArray();
     }
 }
 ```
 
-### 9.4 Label 命名规则(关键)
+**Flink metrics**(subtask 级,接入 Prometheus 抓取):
 
-Stream Load 的 `Label` 是全局唯一的去重 key。建议格式:
+| Metric | 类型 | 说明 |
+|---|---|---|
+| `flink_taskmanager_job_task_promgw_srFlushSuccess` | Counter | 攒批 flush 成功次数 |
+| `flink_taskmanager_job_task_promgw_srFlushFailure` | Counter | 攒批 flush 最终失败次数(已走 DLQ) |
+| `flink_taskmanager_job_task_promgw_srDlqRows` | Counter | 进入 DLQ 的行数 |
 
+### 9.4 StarRocksStreamLoadClient(HTTP 客户端)
+
+`BufferingStarRocksSink` 和 `StarRocksSink` 都复用 `StarRocksStreamLoadClient`(见 [sink/StarRocksStreamLoadClient.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/sink/StarRocksStreamLoadClient.java)),关键特性:
+
+1. **HttpClient 复用**:构造时创建一个 `CloseableHttpClient`,避免每条请求新建 client 导致大量 TIME_WAIT socket 和 DNS 开销。Flink sink 是单线程串行调用,无需同步。
+2. **307 重定向手动处理**:StarRocks FE 收到 Stream Load 后返回 HTTP 307 Temporary Redirect,通过 `Location` 头指向具体 BE。Apache HttpClient 默认不对 PUT 做 307 跟随,因此本客户端关闭自动重定向(`setRedirectsEnabled(false)`),手动读取 `Location` 后用相同 body 和 headers 向 BE 重新发起 PUT,最多重试 5 次防循环。
+3. **响应业务状态校验**:StarRocks 即使数据写入失败(schema 不匹配、格式错误)也返回 HTTP 200,实际结果在 JSON body 的 `Status` 字段:
+   - `Success` — 全部行写入
+   - `Publish Timeout` — 事务提交超时,数据可能不可见
+   - `Fail` — 写入失败
+
+   `validateLoadResult` 解析 JSON 后校验 `Status`,非 `Success` 抛 `IOException`,由上层 sink 重试或写 DLQ。**不校验会静默丢数**。
+4. **部分行丢弃告警**:若 `NumberLoadedRows < NumberTotalRows`(质量过滤导致),记 warn 但不抛异常(StarRocks 的正常行为)。
+
+```java
+public String load(String label, String jsonBody, boolean gzip) throws IOException {
+    byte[] body = jsonBody.getBytes(StandardCharsets.UTF_8);
+    if (gzip) {
+        body = gzipCompress(body);
+    }
+
+    String targetUrl = loadUrl;
+    for (int redirect = 0; redirect <= MAX_REDIRECTS; redirect++) {
+        HttpPut put = buildPutRequest(targetUrl, label, body, gzip);
+        try (CloseableHttpResponse resp = client.execute(put)) {
+            int code = resp.getStatusLine().getStatusCode();
+
+            // 1. 307 重定向:读取 Location,向 BE 重新发起 PUT
+            if (code == 307) {
+                Header locationHeader = resp.getFirstHeader("Location");
+                EntityUtils.consumeQuietly(resp.getEntity());
+                if (locationHeader == null || locationHeader.getValue().isEmpty()) {
+                    throw new IOException("Stream Load 307 redirect missing Location header, label=" + label);
+                }
+                targetUrl = locationHeader.getValue();
+                continue;
+            }
+
+            String result = EntityUtils.toString(resp.getEntity(), StandardCharsets.UTF_8);
+            if (code != 200) {
+                throw new IOException("Stream Load failed: HTTP " + code + ", resp=" + result);
+            }
+            // 2. 校验业务状态(Status 非 Success 抛异常,避免静默丢数)
+            validateLoadResult(result, label);
+            return result;
+        }
+    }
+    throw new IOException("Stream Load exceeded max redirects (" + MAX_REDIRECTS + "), label=" + label);
+}
+
+private void validateLoadResult(String result, String label) throws IOException {
+    JsonNode root = responseMapper.readTree(result);
+    String status = root.path("Status").asText("");
+    if (status.isEmpty()) {
+        LOG.warn("Stream Load response missing Status field, assuming success: label={}", label);
+        return;
+    }
+    if (!"Success".equalsIgnoreCase(status)) {
+        String message = root.path("Message").asText("");
+        throw new IOException("Stream Load failed: label=" + label
+                + ", Status=" + status + ", Message=" + message + ", resp=" + result);
+    }
+    // 部分行被质量过滤丢弃(正常行为,记 warn)
+    long totalRows = root.path("NumberTotalRows").asLong(0);
+    long loadedRows = root.path("NumberLoadedRows").asLong(totalRows);
+    if (totalRows > 0 && loadedRows < totalRows) {
+        long filtered = root.path("NumberFilteredRows").asLong(0);
+        LOG.warn("Stream Load partial success: label={}, loaded={}/{}, filtered={}",
+                label, loadedRows, totalRows, filtered);
+    }
+}
 ```
-<city>_<window_start>_<business>_<labels_hash_short>
-```
 
-例:`sz_20260811_1430_app_business_a3f5e1c2`
+### 9.5 Label 命名规则(关键)
 
-- 同窗口重试 → 同 label,StarRocks 自动去重(at-least-once 语义)
-- 不同城 → 前缀不同,避免跨城冲突
-- 不同窗口 → label 不同,各自独立
+Stream Load 的 `Label` 是全局唯一的去重 key。**同 label 重试 → StarRocks 幂等去重**,因此 label 必须跨重启、跨 subtask、跨窗口唯一。`BufferingStarRocksSink` 区分 batch label 和行级 label:
+
+| 类型 | 格式 | 用途 |
+|---|---|---|
+| **batch label** | `<prefix>_<yyyyMMddHHmmssSSS>_<taskIndex>_<batchSeq>` | 攒批 flush 用,例:`sz_5m_20260811143012345_2_17` |
+| **row label** | `<prefix>_<yyyyMMdd_HHmm>_<business>_<labels_hash>` | DLQ 按行重试用,例:`sz_5m_20260811_1430_app_business_a3f5e1c2d4e5f6a7` |
+
+- **batch label** 含毫秒时间戳 + taskIndex + batchSeq,保证跨重启、跨 subtask、同毫秒多次 flush 都不碰撞
+- **row label** 含**完整 16 字符 labels_hash**(64-bit),而非截断前 8 字符(32-bit),将同 business 内碰撞概率从 ~N²/2³³ 降至 ~N²/2⁶³(N=series 数),避免 label 碰撞导致的静默丢数
+- 不同城 → `labelPrefix` 不同(如 `sz_5m` / `hf_5m`),避免跨城冲突
+- 不同窗口 → 时间戳不同,label 各自独立
+
+> ⚠️ **label 碰撞会导致静默丢数**:同 label 的第二个 Stream Load 会被 StarRocks 当重复请求拒绝。务必用完整 16 字符 hash,不要截断。
 
 ---
 
@@ -957,79 +1094,104 @@ Stream Load 的 `Label` 是全局唯一的去重 key。建议格式:
 prom.<city>.dlq.sr.5m     # Stream Load 失败的批次写回本城 Kafka,等待重放
 ```
 
-每城独立 DLQ,由 C 作业(重放工具)定期消费并重新写 StarRocks。
+每城独立 DLQ,由 C 作业(重放工具)定期消费并重新写 StarRocks。DLQ 消息结构见 [dlq/DlqMessage.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/dlq/DlqMessage.java),含 `payload`(原始 AggResult JSON)、`label`、`error`、`retryCount`、`timestamp`。
 
-### 10.2 失败处理策略
+### 10.2 失败处理策略(BufferingStarRocksSink 集成)
+
+`BufferingStarRocksSink.flush()` 的失败处理流程:
+
+```
+flush 失败
+   │
+   ├─ 重试 1/3(退避 1s)
+   ├─ 重试 2/3(退避 2s)
+   ├─ 重试 3/3(退避 4s)
+   │
+   └─ 最终失败 → sendRowsToDlq(error)
+                    │
+                    ├─ 对 buffer 中每行:
+                    │   - 构造行级 label(含完整 16 字符 labels_hash)
+                    │   - 调 dlqHandler.send(label, rowJson, error)
+                    │   - dlqRowsCounter.inc()
+                    │
+                    ├─ buffer.clear()
+                    └─ return(flush 视为完成,checkpoint 可推进)
+```
+
+> **关键**:DLQ 失败不会静默丢数。若 `dlqHandler.send` 抛异常,异常会传播到 Flink,触发 task 从 last checkpoint 重启(见 [§10.3](#103-kafkadlqhandler-同步发送关键修复))。
+
+### 10.3 KafkaDlqHandler 同步发送(关键修复)
+
+`KafkaDlqHandler`(见 [dlq/KafkaDlqHandler.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/dlq/KafkaDlqHandler.java))实现了 `DlqHandler` 接口,把失败批次写回本城 Kafka DLQ topic。
+
+> ⚠️ **关键修复:同步 send**。早期版本用 `producer.send(record, callback)` 异步发送,`send()` 立即返回 → `BufferingStarRocksSink` 认为 DLQ 成功 → checkpoint 推进 → Kafka ack 实际失败 → 数据**静默丢失**(只记 LOG.error)。修复后用 `producer.send(record).get()` 同步等待 broker ack,失败抛异常传播到 Flink,保证 at-least-once 语义。
 
 ```java
-public class StarRocksSinkWithRetry extends RichSinkFunction<AggResult> {
+public class KafkaDlqHandler implements DlqHandler {
 
-    private transient StarRocksStreamLoadClient client;
-    private transient Producer<byte[], byte[]> dlqProducer;
-    private transient ObjectMapper mapper;
+    private static final Logger LOG = LoggerFactory.getLogger(KafkaDlqHandler.class);
+
+    private final String bootstrapServers;
+    private final String dlqTopic;
+    private final ObjectMapper mapper = new ObjectMapper();
+    private transient KafkaProducer<byte[], byte[]> producer;
 
     @Override
-    public void open(Configuration parameters) {
-        client = new StarRocksStreamLoadClient(feVip, 8030, "prom", "sr_bj_metrics_5m", user, pwd);
-        // DLQ producer
-        Properties p = new Properties();
-        p.put("bootstrap.servers", localKafkaBrokers);
-        p.put("key.serializer", "ByteArraySerializer");
-        p.put("value.serializer", "ByteArraySerializer");
-        dlqProducer = new KafkaProducer<>(p);
-        mapper = new ObjectMapper();
+    public void open() {
+        Properties props = new Properties();
+        props.put("bootstrap.servers", bootstrapServers);
+        props.put("key.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
+        props.put("value.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
+        props.put("acks", "all");                  // 等所有副本 ack
+        props.put("retries", 3);
+        props.put("enable.idempotence", "true");   // 幂等生产者,防重
+        this.producer = new KafkaProducer<>(props);
     }
 
     @Override
-    public void invoke(AggResult result, Context context) throws Exception {
-        String json = mapper.writeValueAsString(result);
-        String label = buildLabel(result);
-
-        int maxRetry = 3;
-        for (int i = 0; i <= maxRetry; i++) {
-            try {
-                String resp = client.load(label, json, true);
-                LOG.debug("Stream Load ok: label={}, resp={}", label, resp);
-                return;
-            } catch (Exception e) {
-                LOG.warn("Stream Load retry {}/{}: label={}, err={}", i, maxRetry, label, e.getMessage());
-                if (i == maxRetry) {
-                    // 最终失败,写 DLQ
-                    sendToDlq(result, label, e.getMessage());
-                    return;
-                }
-                Thread.sleep(1000L * (1 << i));  // 指数退避
-            }
+    public void send(String label, String payload, String error) throws Exception {
+        DlqMessage msg = new DlqMessage(payload, label, error, 0, System.currentTimeMillis());
+        byte[] value = mapper.writeValueAsBytes(msg);
+        // 用 label 作 key,保证同 label 重试落同 partition
+        ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(
+                dlqTopic, label.getBytes(StandardCharsets.UTF_8), value);
+        // 同步发送:.get() 阻塞等待 broker ack
+        // 失败抛 Exception → 由 BufferingStarRocksSink 传播到 Flink →
+        // 触发 task 从 last checkpoint 重启,保证 at-least-once
+        try {
+            producer.send(record).get();
+            LOG.warn("DLQ sent: label={}, topic={}", label, dlqTopic);
+        } catch (Exception e) {
+            LOG.error("DLQ send failed, propagating to ensure at-least-once: label={}", label, e);
+            throw e;
         }
     }
 
-    private void sendToDlq(AggResult result, String label, String error) throws Exception {
-        DlqMessage msg = DlqMessage.builder()
-            .original(result)
-            .label(label)
-            .error(error)
-            .retryCount(0)
-            .timestamp(System.currentTimeMillis())
-            .build();
-        byte[] value = mapper.writeValueAsBytes(msg);
-        dlqProducer.send(new ProducerRecord<>("prom.sz.dlq.sr.5m", label.getBytes(), value));
-    }
-
-    private String buildLabel(AggResult r) {
-        return String.format("%s_%s_%s_%s",
-            r.getIngestCity(),
-            r.getTs().format("yyyyMMdd_HHmm"),
-            r.getBusiness(),
-            r.getLabelsHash().substring(0, 8));
+    @Override
+    public void close() {
+        if (producer != null) {
+            producer.flush();
+            producer.close();
+        }
     }
 }
 ```
 
-### 10.3 DLQ 重放作业(运维工具)
+**配置要点**:
+- `acks=all`:等待所有 ISR 副本 ack,防止单副本故障丢消息
+- `enable.idempotence=true`:幂等生产者,同 label 重试不产生重复消息
+- `label` 作 Kafka key:同 label 的重试落同 partition,C 作业重放时顺序消费
+
+### 10.4 DLQ 重放作业(C 作业,运维工具)
+
+C 作业消费 DLQ topic,重新写 StarRocks:
 
 ```java
 // 简单实现:消费 DLQ topic,重试 N 次,成功则提交 offset,失败则累加 retry_count
 // 超过 max_retry(如 5 次)发到 dead-letter-syslog 告警
+//
+// 关键:重放时用 DlqMessage.label 作 Stream Load label,
+// StarRocks 会按 label 幂等去重,避免重复写入
 ```
 
 ---
@@ -1050,22 +1212,23 @@ public class StarRocksSinkWithRetry extends RichSinkFunction<AggResult> {
 
 ### 11.2 Flink 本地运行
 
-```java
-// Agg5mJob.java 的 main 方法支持本地执行
-public static void main(String[] args) throws Exception {
-    StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(
-        new Configuration());
+`Agg5mJob.main` 直接读 `JobConfig.fromArgs(args)`,默认值即本地配置,无需传参:
 
-    // 本地配置
-    String kafkaBrokers = "localhost:9092";
-    String topic        = "prom.local.routed.app_business";
-    String starrocksUrl = "http://localhost:8030";  // 本地 StarRocks(可选 Docker)
-
-    buildPipeline(env, kafkaBrokers, topic, starrocksUrl, "local_5m");
-
-    env.execute("flink-agg5m-local");
-}
+```bash
+mvn clean package
+java -jar target/flink-agg5m-starrocks-1.0.0.jar \
+  --env local \
+  --kafka-brokers localhost:9092 \
+  --topic prom.local.routed.app_business \
+  --starrocks-host localhost \
+  --starrocks-port 8030 \
+  --label-prefix local_5m \
+  --dlq-topic prom.local.dlq.sr.5m \
+  --sr-batch-size 100 \
+  --sr-batch-interval-ms 5000
 ```
+
+> 本地建议调小 `--sr-batch-size` 和 `--sr-batch-interval-ms`,便于快速看到写入效果,不用等攒满 500 行。
 
 ### 11.3 验证步骤
 
@@ -1139,46 +1302,68 @@ public class PromWriteRequestDecoderTest {
 mvn clean package -Pprod
 # 产物:target/flink-agg5m-starrocks-1.0.0.jar
 
-# 2. 提交到 Flink 集群
+# 2. 提交到 Flink 集群(参数对应 JobConfig.java)
 flink run \
   -d \                                  # detached 模式
   -p 24 \                               # 全局并行度
   -c com.example.promgw.Agg5mJob \
   /appdata/flink/usrlib/flink-agg5m-starrocks-1.0.0.jar \
   --env prod \
-  --city sz \
   --kafka-brokers kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094 \
   --topic prom.sz.routed.app_business \
-  --starrocks-url http://<beijing-fe-vip>:8030 \
+  --group-id flink-agg5m-sz-app-business \
+  --starrocks-host <beijing-fe-vip> \
+  --starrocks-port 8030 \
+  --starrocks-db prom \
+  --starrocks-table sr_bj_metrics_5m \
+  --starrocks-user root \
   --label-prefix sz_5m \
-  --dlq-topic prom.sz.dlq.sr.5m
+  --sr-batch-size 500 \
+  --sr-batch-interval-ms 10000 \
+  --dlq-topic prom.sz.dlq.sr.5m \
+  --dlq-enabled true \
+  --source-parallelism 24 \
+  --agg-parallelism 24 \
+  --checkpoint-path hdfs:///flink/checkpoints/agg5m-sz \
+  --checkpoint-interval-ms 60000 \
+  --window-minutes 5 \
+  --allowed-lateness-ms 30000 \
+  --kafka-start-from committed \
+  --kafka-offset-reset latest
 
-# 3. 配置 JM HA(见生产部署文档)
+# 3. 配置 JM HA(见生产部署文档 §1.1)
 ```
+
+> 完整参数列表见 [JobConfig.java](../../../examples/flink-agg5m-starrocks/src/main/java/com/example/promgw/JobConfig.java)。`--env prod` 会自动启用 SASL_SSL + SCRAM-SHA-512 + gzip + hdfs checkpoint path,无需手动传 SASL/SSL 参数(由 kafka.client 配置文件提供)。
 
 ### 12.2 参数模板
 
-| 参数 | 深圳示例 | 合肥示例 |
-|---|---|---|
-| `--city` | `sz` | `hf` |
-| `--kafka-brokers` | `kafka-1.sz:9094,...` | `kafka-1.hf:9094,...` |
-| `--topic` | `prom.sz.routed.app_business` | `prom.hf.routed.app_business` |
-| `--starrocks-url` | `http://<beijing-fe-vip>:8030` | 同 |
-| `--label-prefix` | `sz_5m` | `hf_5m` |
-| `--dlq-topic` | `prom.sz.dlq.sr.5m` | `prom.hf.dlq.sr.5m` |
-| 并行度 | 24(按 12 partition × 2 TM) | 8 |
+| 参数 | 深圳示例 | 合肥示例 | 说明 |
+|---|---|---|---|
+| `--kafka-brokers` | `kafka-1.sz:9094,...` | `kafka-1.hf:9094,...` | 本城 3 broker |
+| `--topic` | `prom.sz.routed.app_business` | `prom.hf.routed.app_business` | 路由后 topic |
+| `--group-id` | `flink-agg5m-sz-app-business` | `flink-agg5m-hf-app-business` | 消费组 |
+| `--starrocks-host` | `<beijing-fe-vip>` | 同 | 跨城写北京 StarRocks |
+| `--starrocks-port` | `8030` | `8030` | FE http_port(非 8070) |
+| `--label-prefix` | `sz_5m` | `hf_5m` | 每城唯一,避免跨城 label 冲突 |
+| `--sr-batch-size` | `500` | `500` | 攒批行数上限 |
+| `--sr-batch-interval-ms` | `10000` | `10000` | 攒批时间上限(ms) |
+| `--dlq-topic` | `prom.sz.dlq.sr.5m` | `prom.hf.dlq.sr.5m` | 本城 DLQ |
+| `--source-parallelism` | `24` | `8` | = Kafka partition 数 |
+| `--agg-parallelism` | `24` | `8` | 聚合算子并行度 |
 
 ### 12.3 Checkpoint 配置(关键)
 
 ```java
-env.enableCheckpointing(60_000L);  // 1min
+env.enableCheckpointing(60_000L, CheckpointingMode.EXACTLY_ONCE);  // 1min
 env.getCheckpointConfig().setMinPauseBetweenCheckpoints(30_000L);
 env.getCheckpointConfig().setCheckpointTimeout(300_000L);
 env.getCheckpointConfig().setExternalizedCheckpointCleanup(
     CheckpointConfig.ExternalizedCheckpointCleanup.RETAIN_ON_CANCELLATION);
 env.getCheckpointConfig().setCheckpointStorage("hdfs:///flink/checkpoints/agg5m-sz");
-env.setStateBackend(new EmbeddedRocksDBStateBackend());
 ```
+
+> **攒批与 checkpoint 的关系**:`BufferingStarRocksSink` 实现 `CheckpointedFunction`,`snapshotState` 时强制 flush buffer,确保 checkpoint 完成时数据已写入 StarRocks 或 DLQ。checkpoint 间隔(60s)应 ≥ `sr-batch-interval-ms`(10s),避免 checkpoint 频繁打断攒批。
 
 ### 12.4 资源调优建议
 
@@ -1190,6 +1375,9 @@ env.setStateBackend(new EmbeddedRocksDBStateBackend());
 | t-digest compression | 50 | state 减半,精度可接受(见设计文档 §2.2.6) |
 | 窗口允许延迟 | 30s | 超过则丢弃,走 DLQ |
 | Kafka offset 提交 | 关闭自动提交,checkpoint 时提交 | at-least-once 语义 |
+| `--sr-batch-size` | 500 | 单批 500 行,HTTP 请求数降至 1/500 |
+| `--sr-batch-interval-ms` | 10000 | 10s 强制 flush,避免低频 metric 长时间缓冲 |
+| StarRocksStreamLoadClient 超时 | 60s | 大批量写入可能较慢,见 [§9.4](#94-starrocksstreamloadclienthttp-客户端) |
 
 ---
 
@@ -1205,9 +1393,12 @@ env.setStateBackend(new EmbeddedRocksDBStateBackend());
 | `flink_job_lastCheckpointDuration` | Flink metrics | > 60s 告警 |
 | `flink_job_numFailedCheckpoints` | Flink metrics | > 0 告警 |
 | Kafka consumer lag | Kafka exporter | > 10000 告警 |
-| Stream Load 成功率 | 自定义 metric | < 99% 告警 |
-| DLQ 消息数 | 自定义 metric | > 0 告警(需重放) |
+| `flink_taskmanager_job_task_promgw_srFlushSuccess` | 自定义 Counter | 突降 50% 告警(攒批写入停滞) |
+| `flink_taskmanager_job_task_promgw_srFlushFailure` | 自定义 Counter | > 0 告警(批次写失败,已走 DLQ) |
+| `flink_taskmanager_job_task_promgw_srDlqRows` | 自定义 Counter | > 0 告警(需重放 DLQ) |
 | StarRocks 写入 QPS | StarRocks FE | 突降 50% 告警 |
+
+> 攒批相关 metric 由 `BufferingStarRocksSink.open()` 注册到 `MetricGroup.addGroup("promgw")`,subtask 级聚合。告警规则示例见生产部署文档 [06-flink-deployment.md](../production/06-flink-deployment.md)。
 
 ### 13.2 Prometheus 抓取配置
 
@@ -1237,10 +1428,14 @@ env.setStateBackend(new EmbeddedRocksDBStateBackend());
 |---|---|
 | Flink 解码报 `Snappy decoding failed` | Kafka connector 未启用 zstd 自动解压,或消息 payload 不是 snappy 编码。确认 prom-gw 端 `compression.type=zstd` 且 Flink `value.deserializer` 正确 |
 | 数据重复入 StarRocks | (1) payload hash 去重未生效;(2) Stream Load label 重复导致幂等去重未命中。检查 label 命名规则 |
-| 数据丢失 | (1) checkpoint 未启用 → 重启后 offset 回滚;(2) DLQ 未消费 → 失败批次积压 |
+| 数据丢失 | (1) checkpoint 未启用 → 重启后 offset 回滚;(2) DLQ 未消费 → 失败批次积压;(3) DLQ send 异步失败被吞 → 确认 KafkaDlqHandler 已用同步 `.get()`(见 [§10.3](#103-kafkadlqhandler-同步发送关键修复)) |
 | `currentEventTimeLag` 持续增大 | (1) Kafka 消费滞后 → 扩 partition / TM;(2) watermark 策略过严 → 调整 `boundedOutOfOrderness` |
-| Checkpoint 超时 | (1) state 过大 → 调小 t-digest compression;(2) RocksDB IOPS 不足 → 用 SSD |
-| Stream Load 失败率上升 | (1) StarRocks BE 压力大 → 扩 BE;(2) FE VIP 不可达 → 检查专线;(3) label 碰撞 → 调整命名 |
+| Checkpoint 超时 | (1) state 过大 → 调小 t-digest compression;(2) RocksDB IOPS 不足 → 用 SSD;(3) `snapshotState` 时 flush 卡住 → 看 `srFlushFailure` 是否增长,StarRocks 不可达 |
+| Stream Load 失败率上升 | (1) StarRocks BE 压力大 → 扩 BE;(2) FE VIP 不可达 → 检查专线;(3) label 碰撞 → 确认用完整 16 字符 hash;(4) `Status=Fail` 但 HTTP 200 → 确认 `validateLoadResult` 已生效 |
+| `Stream Load 307 redirect missing Location header` | FE 返回 307 但无 Location 头,通常为 StarRocks 版本异常或 FE 配置错误。检查 FE `http_port=8030` 且 BE `be_http_port=8040` 可达 |
+| `Stream Load exceeded max redirects` | 307 重定向超过 5 次,出现 FE↔BE 循环重定向。检查 FE `frontend_address` 和 BE `backend_host` 配置,确认无回环 |
+| HTTP 大量 TIME_WAIT socket | 旧版本每次 load 新建 HttpClient。确认 `StarRocksStreamLoadClient` 复用单例 client(见 [§9.4](#94-starrocksstreamloadclienthttp-客户端)) |
+| 攒批不 flush,数据延迟 | (1) `--sr-batch-interval-ms` 过大 → 调小;(2) subtask 无数据 → 检查 keyBy 分配;(3) checkpoint 间隔过长 → 缩短到 60s |
 | 跨城专线带宽告警 | 5 min 聚合 gzip 后仍 > 专线 30% → 降级为 1h 跨城(见设计文档 §4.5) |
 | Prometheus 指标值与 StarRocks 不一致 | (1) 窗口触发延迟 → 看 watermark;(2) sample stage 采样(prom-gw 端 `rate=0.1`)→ 检查 ruleset;(3) downsample stage 修改了 value → 看 ruleset 是否含 downsample |
 | Kafka header 缺失 | (1) 消费 raw topic 而非 routed topic(老消息可能没 header);(2) prom-gw 版本过旧,升级到最新 |

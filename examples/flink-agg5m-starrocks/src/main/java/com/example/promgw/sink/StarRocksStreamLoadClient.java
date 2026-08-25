@@ -1,5 +1,7 @@
 package com.example.promgw.sink;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -40,6 +42,7 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
     private final String authHeader;
     private final RequestConfig requestConfig;
     private final CloseableHttpClient client;
+    private final ObjectMapper responseMapper = new ObjectMapper();
 
     /** 默认超时 60s(Stream Load 大批量写入可能较慢) */
     private static final int DEFAULT_TIMEOUT_MS = 60_000;
@@ -112,6 +115,14 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
                 if (code != 200) {
                     throw new IOException("Stream Load failed: HTTP " + code + ", resp=" + result);
                 }
+                // 校验 Stream Load 业务状态。
+                // StarRocks 即使数据写入失败(格式错误、schema 不匹配)也返回 HTTP 200,
+                // 实际成功/失败在 JSON body 的 Status 字段:
+                //   "Success"        — 全部写入
+                //   "Publish Timeout" — 事务提交超时,数据可能不可见
+                //   "Fail"           — 写入失败
+                // 不校验会静默丢数。
+                validateLoadResult(result, label);
                 if (LOG.isDebugEnabled()) {
                     LOG.debug("Stream Load ok: label={}, respLen={}", label, result.length());
                 }
@@ -120,6 +131,50 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
         }
         throw new IOException("Stream Load exceeded max redirects (" + MAX_REDIRECTS
                 + "), label=" + label);
+    }
+
+    /**
+     * validateLoadResult 校验 Stream Load 响应 JSON 的 Status 字段。
+     *
+     * StarRocks 返回 HTTP 200 时,实际结果在 body 的 Status 中:
+     *   "Success"        — 全部行写入成功
+     *   "Publish Timeout" — 事务已提交但发布到 BE 超时,数据可能不可见
+     *   "Fail"           — 写入失败(数据被拒绝)
+     *
+     * Status 非 Success 时抛 IOException,由 StarRocksSink.invoke 重试或写 DLQ。
+     * 同 label 重试是安全的:StarRocks 对同 label 请求做幂等去重。
+     *
+     * 额外检查 NumberLoadedRows < NumberTotalRows(质量过滤导致的部分行丢弃),
+     * 记 warn 但不抛异常(这是 StarRocks 的正常 quality filter 行为)。
+     */
+    private void validateLoadResult(String result, String label) throws IOException {
+        JsonNode root;
+        try {
+            root = responseMapper.readTree(result);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IOException("Stream Load response parse error: label=" + label
+                    + ", resp=" + result, e);
+        }
+        String status = root.path("Status").asText("");
+        if (status.isEmpty()) {
+            // 老版本 StarRocks 可能不返回 Status 字段,以 HTTP 200 为准
+            LOG.warn("Stream Load response missing Status field, assuming success: label={}", label);
+            return;
+        }
+        if (!"Success".equalsIgnoreCase(status)) {
+            String message = root.path("Message").asText("");
+            throw new IOException("Stream Load failed: label=" + label
+                    + ", Status=" + status + ", Message=" + message
+                    + ", resp=" + result);
+        }
+        // 部分行被质量过滤丢弃(正常行为,记 warn)
+        long totalRows = root.path("NumberTotalRows").asLong(0);
+        long loadedRows = root.path("NumberLoadedRows").asLong(totalRows);
+        if (totalRows > 0 && loadedRows < totalRows) {
+            long filtered = root.path("NumberFilteredRows").asLong(0);
+            LOG.warn("Stream Load partial success: label={}, loaded={}/{}, filtered={}",
+                    label, loadedRows, totalRows, filtered);
+        }
     }
 
     /** buildPutRequest 构造 Stream Load PUT 请求,含统一的 headers 与 body。 */
