@@ -141,10 +141,11 @@ func (p *Pipeline) workerLoop() {
 		p.drained.Add(1)
 		// 还原请求侧的 ctx(从 message header 的 traceparent),
 		// 再派生一个受 pipeline.Stop 控制的 ctx,这样阻塞中的 Send 能被取消。
+		// 注:sendCtx 派生自 p.ctx,Stop 时 cancel p.ctx 会让 sendCtx 同步取消,
+		// 因此把 sendCtx 传给 sink.Send 既能透传 trace 上下文,又能受 Stop 控制。
 		sendCtx := tracex.ExtractTraceparent(p.ctx, msg.Headers["traceparent"])
 		_, span := tracex.StartSpan(sendCtx, "sink", "send")
-		// 用 pipeline 持有的 ctx,Stop 时会 cancel 让阻塞中的 Send 立即返回。
-		err := p.sink.Send(p.ctx, msg)
+		err := p.sink.Send(sendCtx, msg)
 		tracex.EndSpan(span, err)
 		if err != nil {
 			if errors.Is(err, ErrClosed) {

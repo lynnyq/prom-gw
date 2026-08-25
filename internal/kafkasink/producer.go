@@ -176,6 +176,10 @@ func New(cfg Config) (*Producer, error) {
 	}
 
 	// 1. 建连(client 初始化时即会异步探活)
+	// 注意:不开启 AllowAutoTopicCreation。项目硬约束要求 routed topic
+	// (prom.<city>.routed.core/infra/data/app_business) 必须为 64 分区 3 副本,
+	// 自动创建会用 broker 默认值(通常 1 分区 1 副本)违反约束。
+	// 部署时由 kafka-topics.sh 预创建,参见 docs/operations/production/03-kafka-deployment.md。
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID(cfg.ClientID),
@@ -184,7 +188,6 @@ func New(cfg Config) (*Producer, error) {
 		kgo.ProducerLinger(cfg.Linger),
 		kgo.RequestTimeoutOverhead(cfg.RequestTimeoutOverhead),
 		kgo.ProducerBatchCompression(compression),
-		kgo.AllowAutoTopicCreation(),
 		// spec §6.3: delivery.timeout.ms=120000,retries=10
 		kgo.RecordDeliveryTimeout(cfg.RecordTimeout),
 		kgo.RecordRetries(cfg.RecordRetries),

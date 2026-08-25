@@ -165,14 +165,17 @@ func TestReplay_AfterRotation(t *testing.T) {
 	writeN(t, w, 30)
 
 	// Force a final seal so we can replay.
+	// 锁顺序必须与 Write/Close 一致:先在 w.mu 下读 active 指针并释放 w.mu,
+	// 再 active.mu.Lock → sealActiveSegment(内部获取 w.mu)。
+	// 若持有 w.mu 时调 sealActiveSegment,会因 w.mu 非重入导致 self-deadlock。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	var seen []string
 	var mu sync.Mutex
@@ -195,14 +198,15 @@ func TestReplay_HandlerErrorRetries(t *testing.T) {
 
 	writeN(t, w, 20)
 
+	// 锁顺序与 Write/Close 一致(详见 TestReplay_AfterRotation 注释)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	var attempts atomic.Int32
 	// 第一次调用失败,后续都成功,验证 retries 后能完成。
@@ -222,14 +226,15 @@ func TestReplay_HandlerPermanentErrorGivesUp(t *testing.T) {
 
 	writeN(t, w, 10)
 
+	// 锁顺序与 Write/Close 一致(详见 TestReplay_AfterRotation 注释)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	err := w.Replay(context.Background(), func(rec Record) error {
 		return errors.New("permanent")
@@ -244,14 +249,16 @@ func TestReplay_MarksDoneOnSuccess(t *testing.T) {
 	w := newTestWAL(t, Config{Dir: dir, SegmentBytes: 1024})
 
 	writeN(t, w, 10)
+	// 锁顺序与 Write/Close 一致:先在 w.mu 下读 active 指针并释放 w.mu,
+	// 再 active.mu.Lock → sealActiveSegment(内部获取 w.mu)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	require.NoError(t, w.Replay(context.Background(), func(rec Record) error { return nil }))
 
@@ -403,14 +410,16 @@ func TestSegmentFooter_CorruptionDetected(t *testing.T) {
 	w := newTestWAL(t, Config{Dir: dir, SegmentBytes: 1 << 20})
 
 	writeN(t, w, 3)
+	// 锁顺序与 Write/Close 一致:先在 w.mu 下读 active 指针并释放 w.mu,
+	// 再 active.mu.Lock → sealActiveSegment(内部获取 w.mu)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	// Find the sealed segment and corrupt the first record body.
 	w.mu.Lock()
@@ -450,14 +459,16 @@ func TestCleanup_RemovesOldDone(t *testing.T) {
 	require.NoError(t, err)
 
 	writeN(t, w, 2)
+	// 锁顺序与 Write/Close 一致:先在 w.mu 下读 active 指针并释放 w.mu,
+	// 再 active.mu.Lock → sealActiveSegment(内部获取 w.mu)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 
 	require.NoError(t, w.Replay(context.Background(), func(rec Record) error { return nil }))
 
@@ -527,14 +538,16 @@ func TestScanExisting_PicksUpSealedAndDone(t *testing.T) {
 	// Pre-populate dir with .sealed and .done files via a real WAL run.
 	w := newTestWAL(t, Config{Dir: dir, SegmentBytes: 1 << 20, CleanupInterval: time.Hour, Retention: time.Hour})
 	writeN(t, w, 2)
+	// 锁顺序与 Write/Close 一致:先在 w.mu 下读 active 指针并释放 w.mu,
+	// 再 active.mu.Lock → sealActiveSegment(内部获取 w.mu)。
 	w.mu.Lock()
-	if w.active != nil {
-		active := w.active
+	active := w.active
+	w.mu.Unlock()
+	if active != nil {
 		active.mu.Lock()
-		_ = w.sealActiveLocked()
+		_ = w.sealActiveLocked(active)
 		active.mu.Unlock()
 	}
-	w.mu.Unlock()
 	require.NoError(t, w.Replay(context.Background(), func(rec Record) error { return nil }))
 	w.Close()
 
@@ -589,4 +602,66 @@ func TestNextSeq_Monotonic(t *testing.T) {
 	}
 	assert.Equal(t, 11, nextSeq(existing))
 	assert.Equal(t, 0, nextSeq(map[string]*SegmentInfo{}))
+}
+
+// --- 并发安全(回归 #1: segments map 数据竞争) ---
+
+// TestWrite_ConcurrentWithReaders 验证 Write(含段轮转,会修改 w.segments map)
+// 与并发的 Segments/Bytes/OldestAge(读 w.segments map) 不会触发 Go race detector。
+//
+// 修复前 sealActiveSegment 在 active.mu 下修改 w.segments map 而无 w.mu,
+// 与 Replay/Segments/cleanup 读 map 构成 data race,本测试在 -race 下会 fail。
+func TestWrite_ConcurrentWithReaders(t *testing.T) {
+	dir := newTempDir(t)
+	// 极小 SegmentBytes 强制频繁轮转,放大 map 写并发窗口。
+	w := newTestWAL(t, Config{Dir: dir, SegmentBytes: 256, CleanupInterval: time.Hour, Retention: time.Hour})
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// 4 个 writer 并发写,触发段轮转(修改 w.segments)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				// 忽略 ErrWALFull(MaxBytes 未设,不会触发;主要触发轮转)
+				_ = w.Write(context.Background(), mkRec("t1", make([]byte, 50)))
+			}
+		}()
+	}
+
+	// 4 个 reader 并发读 w.segments / w.bytes / w.active
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = w.Segments()
+				_ = w.Bytes()
+				_ = w.OldestAge()
+			}
+		}()
+	}
+
+	// 跑 800ms 让并发窗口充分暴露
+	time.Sleep(800 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// 最终一致性校验:有数据且段数 > 0
+	assert.Greater(t, w.Bytes(), int64(0))
+	segs := w.Segments()
+	assert.NotEmpty(t, segs, "should have produced sealed segments via rotation")
+	t.Logf("concurrent test: segments=%d, bytes=%d", len(segs), w.Bytes())
 }

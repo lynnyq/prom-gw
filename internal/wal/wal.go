@@ -362,7 +362,14 @@ func (w *fileWAL) sealRecoveredSegment(path, baseName string) error {
 }
 
 // openNewActive 打开一个新 active 段。
+//
+// nextSeq 遍历 w.segments map、赋值 w.active 都修改 fileWAL 共享状态,
+// 必须在 w.mu 下完成,避免与 sealActiveSegment/Replay/Segments 等并发 panic。
+// 调用方持有 active.mu(旧段),这里获取 w.mu → 锁顺序 active.mu → w.mu,
+// 与 Write L446 的 w.mu → active.mu 不构成嵌套(中间已 Unlock),无死锁风险。
 func (w *fileWAL) openNewActive() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	seq := nextSeq(w.segments)
 	baseName := fmt.Sprintf("seg-%d-%06d.log", time.Now().UnixNano(), seq)
 	path := filepath.Join(w.cfg.Dir, baseName)
@@ -453,7 +460,7 @@ func (w *fileWAL) Write(ctx context.Context, rec Record) error {
 	active.mu.Lock()
 	// 检查是否需要轮转
 	if active.written+int64(len(encoded))+segmentFooterSize > w.cfg.SegmentBytes {
-		if err := w.sealActiveLocked(); err != nil {
+		if err := w.sealActiveLocked(active); err != nil {
 			active.mu.Unlock()
 			return fmt.Errorf("wal: rotate: %w", err)
 		}
@@ -461,7 +468,15 @@ func (w *fileWAL) Write(ctx context.Context, rec Record) error {
 			active.mu.Unlock()
 			return fmt.Errorf("wal: open new: %w", err)
 		}
+		// 旧段已 seal,释放旧段 active.mu,再在 w.mu 下读取新 active 指针。
+		// 旧段文件已关闭,后续无人再 lock 旧段;unlock 仅保持锁计数正确。
+		active.mu.Unlock()
+		w.mu.Lock()
 		active = w.active
+		w.mu.Unlock()
+		if active == nil {
+			return fmt.Errorf("wal: no active segment after rotate")
+		}
 		active.mu.Lock()
 	}
 
@@ -529,10 +544,13 @@ func diskUsedRatio(dir string) (float64, bool) {
 	return used, true
 }
 
-// sealActiveLocked 把 active 段 flush + 写 footer + rename 为 .sealed。
-// 调用方必须持有 active.mu;w.mu 由调用方按需锁定。
-func (w *fileWAL) sealActiveLocked() error {
-	return w.sealActiveSegment(w.active)
+// sealActiveLocked 把指定 active 段 flush + 写 footer + rename 为 .sealed。
+// 调用方必须持有 active.mu;w.mu 由 sealActiveSegment 内部按需加锁。
+// 注:参数 active 必须由调用方持有(从 L446 w.mu 下读到),不能在此处重新读
+// w.active —— 那样会与 openNewActive 写 w.active 构成数据竞争,且可能 seal 到
+// 已被其他 goroutine 轮转后的新段。
+func (w *fileWAL) sealActiveLocked(active *activeSegment) error {
+	return w.sealActiveSegment(active)
 }
 
 // sealActiveSegment 封指定段并把它从 active 摘除,加入到 sealed 索引。
@@ -563,8 +581,13 @@ func (w *fileWAL) sealActiveSegment(active *activeSegment) error {
 		return err
 	}
 
-	// 加入 segments 索引
+	// 加入 segments 索引并更新 active 引用。
+	// 这两步修改 fileWAL 的共享状态(w.segments map / w.active),
+	// 必须在 w.mu 下完成,否则与 Replay/Segments/cleanup 等读 map 的方法并发会 panic。
+	// 锁顺序:调用方持有 active.mu,这里获取 w.mu → active.mu → w.mu;
+	// 经审查无反向嵌套(w.mu → active.mu),不会死锁。
 	info, _ := os.Stat(sealedPath)
+	w.mu.Lock()
 	w.segments[active.baseName] = &SegmentInfo{
 		Path:        sealedPath,
 		BaseName:    active.baseName,
@@ -577,6 +600,7 @@ func (w *fileWAL) sealActiveSegment(active *activeSegment) error {
 	if w.active == active {
 		w.active = nil
 	}
+	w.mu.Unlock()
 	return nil
 }
 
