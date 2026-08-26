@@ -4633,13 +4633,32 @@ rest.flamegraph.enabled: true
 
 # ====== JDK ======
 # Flink 1.19 官方支持 Java 11/17,不支持 JDK 21+。
-# 系统默认 java 可能是 JDK 25(给 Kafka/StarRocks),必须显式指定 JDK 17,
-# 否则 Kryo 反射访问 java.util.Arrays$ArrayList 等内部字段会报
-# InaccessibleObjectException(module java.base does not "opens java.util")。
+# 系统默认 java 可能是 JDK 25(给 Kafka/StarRocks),必须显式指定 JDK 17。
 env.java.home: /usr/lib/jvm/java-17-openjdk
 
-# ====== 日志 ======
-env.java.opts.all: -XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:+AlwaysPreTouch
+# ====== JVM ======
+# 注意:覆盖 env.java.opts.all 会丢失 Flink 默认携带的 --add-opens 参数。
+# JDK 17+ 默认强封装,任何类型落到 Kryo 时,其 Chill 序列化器
+# (ArraysAsListSerializer 等)反射访问 java.util 内部字段会抛
+# InaccessibleObjectException(module java.base does not "opens java.util")。
+# 本工程 Flink 作业已在代码层消除 Kryo(@TypeInfo 显式声明原生序列化器),
+# 但仍保留 --add-opens 兜底,防止其他作业/字段意外落入 Kryo。
+env.java.opts.all: >-
+  --add-opens=java.base/java.lang=ALL-UNNAMED
+  --add-opens=java.base/java.net=ALL-UNNAMED
+  --add-opens=java.base/java.io=ALL-UNNAMED
+  --add-opens=java.base/java.nio=ALL-UNNAMED
+  --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+  --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+  --add-opens=java.base/java.text=ALL-UNNAMED
+  --add-opens=java.base/java.time=ALL-UNNAMED
+  --add-opens=java.base/java.util=ALL-UNNAMED
+  --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+  --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+  --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+  -XX:+UseG1GC
+  -XX:MaxGCPauseMillis=100
+  -XX:+AlwaysPreTouch
 ```
 
 #### 5.2 关键参数说明
@@ -5051,8 +5070,11 @@ taskmanager.network.memory.buffers-per-channel: 4  # 每 channel 缓冲区数
 #### 9.5 JVM 调优
 
 ```yaml
-# flink-conf.yaml
+# flink-conf.yaml(必须保留 --add-opens,理由见 5.1 JVM 说明)
 env.java.opts.all: >-
+  --add-opens=java.base/java.util=ALL-UNNAMED
+  --add-opens=java.base/java.lang=ALL-UNNAMED
+  --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
   -XX:+UseG1GC
   -XX:MaxGCPauseMillis=100
   -XX:+AlwaysPreTouch

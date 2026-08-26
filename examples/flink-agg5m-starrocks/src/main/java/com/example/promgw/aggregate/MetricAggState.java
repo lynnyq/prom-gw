@@ -1,9 +1,15 @@
 package com.example.promgw.aggregate;
 
 import java.io.Serializable;
+import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.flink.api.common.typeinfo.TypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 
 /**
  * MetricAggState 窗口聚合累加器状态。
@@ -14,6 +20,7 @@ import java.util.Map;
  * 实现 {@link Serializable}:作为 AggregateFunction 的累加器,Flink 会在
  * checkpoint 时序列化窗口状态,累加器必须可序列化。
  */
+@TypeInfo(MetricAggState.Factory.class)
 public class MetricAggState implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -52,5 +59,39 @@ public class MetricAggState implements Serializable {
         ingestDc = null;
         ingestTimeMs = 0;
         traceparent = null;
+    }
+
+    /**
+     * typeInfo 显式声明 MetricAggState 的 Flink 序列化器。
+     *
+     * MetricAggState 是窗口聚合累加器,checkpoint 时由状态后端序列化。
+     * Flink 自动分析 POJO 时,samples(List)/labels(Map)接口字段会被推断为
+     * GenericTypeInfo 并落入 Kryo,JDK 17+ 强封装下 Kryo 初始化即抛
+     * InaccessibleObjectException。显式声明后全部使用 Flink 原生序列化器。
+     */
+    public static TypeInformation<MetricAggState> typeInfo() {
+        Map<String, TypeInformation<?>> fields = new LinkedHashMap<>();
+        fields.put("count", Types.LONG);
+        fields.put("sum", Types.DOUBLE);
+        fields.put("max", Types.DOUBLE);
+        fields.put("min", Types.DOUBLE);
+        fields.put("samples", Types.LIST(Types.DOUBLE));
+        fields.put("tenant", Types.STRING);
+        fields.put("metric", Types.STRING);
+        fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
+        fields.put("sourceDc", Types.STRING);
+        fields.put("ingestCity", Types.STRING);
+        fields.put("ingestDc", Types.STRING);
+        fields.put("ingestTimeMs", Types.LONG);
+        fields.put("traceparent", Types.STRING);
+        return Types.POJO(MetricAggState.class, fields);
+    }
+
+    /** Factory 供 Flink TypeExtractor 自动推导类型时复用 {@link #typeInfo()}。 */
+    public static class Factory extends TypeInfoFactory<MetricAggState> {
+        @Override
+        public TypeInformation<MetricAggState> createTypeInfo(Type t, Map<String, TypeInformation<?>> genericParameters) {
+            return typeInfo();
+        }
     }
 }

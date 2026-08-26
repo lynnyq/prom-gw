@@ -70,10 +70,14 @@ public class Agg5mJob {
         KafkaSource<KafkaRecord> kafkaSource = buildKafkaSource(cfg);
 
         // 3. 构建数据流
+        //    显式传入 TypeInformation:Flink 对 KafkaSource 泛型的自动推导可能落到
+        //    Kryo,而 Kryo 在 JDK 17+(未加 --add-opens)初始化即失败。
+        //    KafkaRecord.typeInfo() 全部使用 Flink 原生序列化器,不触发 Kryo。
         DataStream<KafkaRecord> kafkaStream = env.fromSource(
                 kafkaSource,
                 WatermarkStrategy.noWatermarks(),
-                "kafka-source"
+                "kafka-source",
+                KafkaRecord.typeInfo()
         ).setParallelism(cfg.sourceParallelism);
 
         // 4. 按 payload hash 去重 + 解码

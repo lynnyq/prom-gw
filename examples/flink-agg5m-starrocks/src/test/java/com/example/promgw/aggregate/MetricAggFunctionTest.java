@@ -2,6 +2,7 @@ package com.example.promgw.aggregate;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -45,7 +46,9 @@ class MetricAggFunctionTest {
     @Test
     void testPercentileExact() {
         // 10 个值:1,2,3,...,10
-        List<Double> sorted = Arrays.asList(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0);
+        // 注意:不用 Arrays.asList 直接返回值(JDK 内部 Arrays$ArrayList 实现,
+        // Kryo 反射序列化存在隐患),统一包装为普通 ArrayList。
+        List<Double> sorted = new ArrayList<>(Arrays.asList(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0));
 
         // p50: ceil(0.5 * 10) - 1 = 4 → 索引 4 → 5.0
         assertThat(MetricAggFunction.percentile(sorted, 0.50)).isEqualTo(5.0);
@@ -59,11 +62,11 @@ class MetricAggFunctionTest {
 
     @Test
     void testPercentileEdgeCases() {
-        List<Double> single = Arrays.asList(42.0);
+        List<Double> single = new ArrayList<>(Arrays.asList(42.0));
         assertThat(MetricAggFunction.percentile(single, 0.50)).isEqualTo(42.0);
         assertThat(MetricAggFunction.percentile(single, 0.99)).isEqualTo(42.0);
 
-        List<Double> empty = Arrays.asList();
+        List<Double> empty = new ArrayList<>(Arrays.asList());
         assertThat(MetricAggFunction.percentile(empty, 0.50)).isNaN();
     }
 

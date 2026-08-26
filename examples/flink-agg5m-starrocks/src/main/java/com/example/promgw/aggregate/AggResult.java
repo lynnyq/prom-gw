@@ -2,8 +2,15 @@ package com.example.promgw.aggregate;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
 import java.io.Serializable;
+import java.lang.reflect.Type;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.Map;
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 
 /**
  * AggResult 5min 聚合结果,对应 StarRocks sr_bj_metrics_5m 表一行。
@@ -16,6 +23,7 @@ import java.util.Map;
  * 实现 {@link Serializable}:本类用于 BufferingStarRocksSink 的 ListState<AggResult>
  * checkpoint 状态,Flink checkpoint 时会序列化状态对象。
  */
+@TypeInfo(AggResult.Factory.class)
 public class AggResult implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -92,4 +100,41 @@ public class AggResult implements Serializable {
 
     public Date getIngestTime() { return ingestTime; }
     public void setIngestTime(Date ingestTime) { this.ingestTime = ingestTime; }
+
+    /**
+     * typeInfo 显式声明 AggResult 的 Flink 序列化器。
+     *
+     * AggResult 既在算子间传输,也作为 BufferingStarRocksSink 的 ListState 状态。
+     * Flink 自动分析 POJO 时,labels(Map 接口字段)会被推断为 GenericTypeInfo
+     * 并落入 Kryo,JDK 17+ 强封装下 Kryo 初始化即抛 InaccessibleObjectException。
+     * 显式声明后全部使用 Flink 原生序列化器(Date 用 BasicTypeInfo)。
+     */
+    public static TypeInformation<AggResult> typeInfo() {
+        Map<String, TypeInformation<?>> fields = new LinkedHashMap<>();
+        fields.put("ts", BasicTypeInfo.DATE_TYPE_INFO);
+        fields.put("metric", Types.STRING);
+        fields.put("tenant", Types.STRING);
+        fields.put("business", Types.STRING);
+        fields.put("ingestCity", Types.STRING);
+        fields.put("sourceDc", Types.STRING);
+        fields.put("labelsHash", Types.STRING);
+        fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
+        fields.put("sampleCount", Types.LONG);
+        fields.put("valueSum", Types.DOUBLE);
+        fields.put("valueMax", Types.DOUBLE);
+        fields.put("valueMin", Types.DOUBLE);
+        fields.put("valueAvg", Types.DOUBLE);
+        fields.put("valueP50", Types.DOUBLE);
+        fields.put("valueP99", Types.DOUBLE);
+        fields.put("ingestTime", BasicTypeInfo.DATE_TYPE_INFO);
+        return Types.POJO(AggResult.class, fields);
+    }
+
+    /** Factory 供 Flink TypeExtractor 自动推导类型时复用 {@link #typeInfo()}。 */
+    public static class Factory extends TypeInfoFactory<AggResult> {
+        @Override
+        public TypeInformation<AggResult> createTypeInfo(Type t, Map<String, TypeInformation<?>> genericParameters) {
+            return typeInfo();
+        }
+    }
 }
