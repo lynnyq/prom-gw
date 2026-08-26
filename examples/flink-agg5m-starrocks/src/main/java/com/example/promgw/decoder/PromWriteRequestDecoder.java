@@ -2,6 +2,7 @@ package com.example.promgw.decoder;
 
 import com.example.promgw.proto.PromProtos.WriteRequest;
 import java.io.IOException;
+import java.io.Serializable;
 import java.util.Map;
 import org.xerial.snappy.Snappy;
 
@@ -17,8 +18,13 @@ import org.xerial.snappy.Snappy;
  *   一个 WriteRequest 含 N 个 sample → 产生 N 条 Kafka 消息,payload 完全相同,Key 不同。
  *   因此本类不直接输出单条 sample,而是输出整个 WriteRequest + header 元数据,
  *   由上游 DedupFunction 按 payload hash 去重后再展开。
+ *
+ * 实现 {@link Serializable}:本类被 DedupFunction 作为字段持有,DedupFunction
+ * 作为 Flink 算子会被 ClosureCleaner 序列化分发到 TaskManager。
  */
-public class PromWriteRequestDecoder {
+public class PromWriteRequestDecoder implements Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     /**
      * decode 解码一条 Kafka 消息。

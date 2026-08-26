@@ -1,5 +1,6 @@
 package com.example.promgw.decoder;
 
+import java.io.Serializable;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -13,8 +14,12 @@ import java.util.Map;
  *
  * 注意:一条 Kafka 消息的 payload 是整个 WriteRequest,包含 N 个 series。
  * 上游(prom-gw)为每个 sample 产生一条消息但 payload 相同,需在 DedupFunction 去重。
+ *
+ * 实现 {@link Serializable}:作为 DataStream 中的传输对象,需支持 Flink 序列化。
  */
-public class PromSample {
+public class PromSample implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     private List<ParsedSeries> timeseries;
     private String tenant;
     private String sourceDc;
@@ -62,7 +67,9 @@ public class PromSample {
     public void setTraceparent(String traceparent) { this.traceparent = traceparent; }
 
     /** ParsedSeries WriteRequest 中单个 TimeSeries 解析结果。 */
-    public static class ParsedSeries {
+    public static class ParsedSeries implements Serializable {
+
+        private static final long serialVersionUID = 1L;
         private String metricName;
         private Map<String, String> labels;
         private List<ParsedSample> samples;
@@ -86,7 +93,9 @@ public class PromSample {
     }
 
     /** ParsedSample 单个采样点。 */
-    public static class ParsedSample {
+    public static class ParsedSample implements Serializable {
+
+        private static final long serialVersionUID = 1L;
         private double value;
         private long timestampMs;
 

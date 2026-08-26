@@ -82,13 +82,21 @@ mvn test
 [INFO] Running com.example.promgw.decoder.PromWriteRequestDecoderTest
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.JobConfigTest
-[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.sink.StarRocksStreamLoadClientTest
+[INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.sink.StarRocksSinkTest
+[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.sink.BufferingStarRocksSinkTest
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Running com.example.promgw.Agg5mJobOffsetsTest
 [INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.dlq.KafkaDlqHandlerSerializationTest
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Running com.example.promgw.FlinkSerializationAuditTest
+[INFO] Tests run: 17, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Results:
-[INFO] Tests run: 46, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 90, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -98,9 +106,13 @@ mvn test
 | `LabelsHasherTest` | 7 | SHA-1 哈希稳定性、空 labels、排序一致性 |
 | `MetricAggFunctionTest` | 4 | 5min 窗口聚合 sum/count/max/min/avg/p50/p99 |
 | `PromWriteRequestDecoderTest` | 6 | snappy 解压 + protobuf 解码 + 样本提取 |
-| `JobConfigTest` | 8 | Kafka offset 参数解析与默认值 |
-| `StarRocksStreamLoadClientTest` | 6 | 307 重定向跟随、body/header 转发、循环保护 |
+| `JobConfigTest` | 12 | Kafka offset / watermark / 攒批参数解析与默认值 |
+| `StarRocksStreamLoadClientTest` | 12 | 307 重定向、响应体 Status/行数校验、全过滤防护 |
+| `StarRocksSinkTest` | 4 | Stream Load 失败重试与 DLQ 降级 |
+| `BufferingStarRocksSinkTest` | 6 | 攒批 flush 触发、checkpoint 状态 |
 | `Agg5mJobOffsetsTest` | 15 | 起始位点策略构建、非法取值与 timestamp 校验 |
+| `KafkaDlqHandlerSerializationTest` | 7 | DLQ 处理器 Flink 序列化兼容、transient 重建 |
+| `FlinkSerializationAuditTest` | 17 | 全量算子/POJO 序列化审计、checkpoint 状态可序列化 |
 
 ### 步骤 3:打包验证
 
@@ -308,6 +320,9 @@ payload 是 Prometheus 原始字节,不含租户信息。tenant/source_dc/ingest
 | `--kafka-start-from` | Kafka 起始位点策略:committed/earliest/latest/timestamp | committed |
 | `--kafka-offset-reset` | 无已提交位点时的重置策略:earliest/latest/none | latest |
 | `--kafka-start-timestamp` | 起始时间戳(epoch millis,`--kafka-start-from=timestamp` 时必填) | 0 |
+| `--watermark-idleness-ms` | watermark 空闲检测时长;上游 subtask 空闲超过该时长不再阻塞窗口触发 | 60000 |
+| `--sr-batch-size` | Stream Load 攒批行数上限 | 500 |
+| `--sr-batch-interval-ms` | Stream Load 攒批时间上限(ms) | 10000 |
 
 ### Kafka 消费位点参数说明
 

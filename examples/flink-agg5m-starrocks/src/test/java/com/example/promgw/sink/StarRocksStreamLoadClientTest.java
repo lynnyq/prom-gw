@@ -270,8 +270,10 @@ class StarRocksStreamLoadClientTest {
     }
 
     @Test
-    void testThrowsOnPublishTimeout() throws Exception {
-        // StarRocks 返回 HTTP 200 但 Status=Publish Timeout(数据可能不可见)
+    void testPublishTimeoutSucceeds() throws Exception {
+        // StarRocks 返回 HTTP 200 + Status=Publish Timeout:
+        // 事务已提交仅发布超时,数据最终可见,视为成功。
+        // 若误判为失败重试,同 label 会返回 Label Already Exists,又误判失败 → 无意义 DLQ。
         feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
@@ -288,14 +290,88 @@ class StarRocksStreamLoadClientTest {
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
                 "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
 
-        assertThatThrownBy(() -> client.load("test_label_timeout", "{}", false))
+        String result = client.load("test_label_timeout", "{}", false);
+        assertThat(result).contains("Publish Timeout");
+    }
+
+    @Test
+    void testLabelAlreadyExistsSucceeds() throws Exception {
+        // 同 label 重复提交(网络超时后重试),事务已提交,视为成功
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "{\"Status\":\"Label Already Exists\",\"Message\":\"label duplicated\"}";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        String result = client.load("test_label_dup", "{}", false);
+        assertThat(result).contains("Label Already Exists");
+    }
+
+    @Test
+    void testThrowsOnAllRowsFiltered() throws Exception {
+        // Status=Success 但 NumberLoadedRows=0:全部行被过滤(类型不匹配/列缺失),
+        // 一条数据都没落库 → 必须抛异常走重试/DLQ(否则静默丢整批)
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "{\"Status\":\"Success\",\"NumberTotalRows\":100,"
+                        + "\"NumberLoadedRows\":0,\"NumberFilteredRows\":100,"
+                        + "\"ErrorURL\":\"http://be:8040/api/_load_error_log\"}";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        assertThatThrownBy(() -> client.load("test_label_allfiltered", "{}", false))
                 .isInstanceOf(IOException.class)
-                .hasMessageContaining("Publish Timeout");
+                .hasMessageContaining("all filtered")
+                .hasMessageContaining("0/100");
+    }
+
+    @Test
+    void testThrowsOnMalformedResponseBody() throws Exception {
+        // HTTP 200 但响应体不是 JSON(被网关/代理拦截等场景)
+        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange exchange) throws IOException {
+                exchange.getRequestBody().readAllBytes();
+                String resp = "<html>gateway timeout</html>";
+                byte[] respBytes = resp.getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, respBytes.length);
+                exchange.getResponseBody().write(respBytes);
+                exchange.close();
+            }
+        });
+        feServer.start();
+
+        StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
+                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+
+        assertThatThrownBy(() -> client.load("test_label_malformed", "{}", false))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("parse error");
     }
 
     @Test
     void testPartialLoadLogsWarningButSucceeds() throws Exception {
-        // 部分行被质量过滤丢弃(正常行为),Status=Success 但 loaded < total
+        // 部分行被质量过滤丢弃(正常行为),Status=Success 但 0 < loaded < total
         feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {

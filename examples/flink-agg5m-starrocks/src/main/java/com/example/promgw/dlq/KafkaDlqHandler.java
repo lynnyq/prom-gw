@@ -2,6 +2,7 @@ package com.example.promgw.dlq;
 
 import com.example.promgw.sink.DlqHandler;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
 import org.apache.kafka.clients.producer.KafkaProducer;
@@ -14,24 +15,35 @@ import org.slf4j.LoggerFactory;
  *
  * DLQ topic 命名:prom.<city>.dlq.sr.5m
  * 由运维工具(C 作业)定期消费并重新写 StarRocks,超过 max_retry 则告警。
+ *
+ * 序列化说明:本类作为 StarRocksSink 的字段被 Flink ClosureCleaner 序列化后
+ * 分发到 TaskManager。bootstrapServers/dlqTopic 为可序列化基本类型;
+ * mapper/producer 为运行时资源,标记 transient 在 open() 中重建。
  */
-public class KafkaDlqHandler implements DlqHandler {
+public class KafkaDlqHandler implements DlqHandler, Serializable {
+
+    private static final long serialVersionUID = 1L;
 
     private static final Logger LOG = LoggerFactory.getLogger(KafkaDlqHandler.class);
 
     private final String bootstrapServers;
     private final String dlqTopic;
-    private final ObjectMapper mapper = new ObjectMapper();
+    private transient ObjectMapper mapper;
 
     private transient KafkaProducer<byte[], byte[]> producer;
 
     public KafkaDlqHandler(String bootstrapServers, String dlqTopic) {
         this.bootstrapServers = bootstrapServers;
         this.dlqTopic = dlqTopic;
+        this.mapper = new ObjectMapper();
     }
 
     @Override
     public void open() {
+        // mapper 可能在反序列化后为 null(TaskManager 侧),这里重建
+        if (mapper == null) {
+            mapper = new ObjectMapper();
+        }
         Properties props = new Properties();
         props.put("bootstrap.servers", bootstrapServers);
         props.put("key.serializer", "org.apache.kafka.common.serialization.ByteArraySerializer");
@@ -39,6 +51,11 @@ public class KafkaDlqHandler implements DlqHandler {
         props.put("acks", "all");
         props.put("retries", 3);
         props.put("enable.idempotence", "true");
+        // DLQ 是兜底通道,故障要快速暴露:默认 max.block.ms=60s 会让每次失败的
+        // 发送阻塞 1 分钟(broker 不可达/topic 不存在时),拖垮 sink 吞吐。
+        props.put("max.block.ms", 10_000);
+        props.put("delivery.timeout.ms", 15_000);
+        props.put("request.timeout.ms", 5_000);
         this.producer = new KafkaProducer<>(props);
         LOG.info("KafkaDlqHandler opened: brokers={}, topic={}", bootstrapServers, dlqTopic);
     }
@@ -70,5 +87,32 @@ public class KafkaDlqHandler implements DlqHandler {
             producer.flush();
             producer.close();
         }
+    }
+
+    // ---- 以下为测试辅助方法(package-private) ----
+
+    String getBootstrapServers() {
+        return bootstrapServers;
+    }
+
+    String getDlqTopic() {
+        return dlqTopic;
+    }
+
+    boolean isMapperNull() {
+        return mapper == null;
+    }
+
+    boolean isProducerNull() {
+        return producer == null;
+    }
+
+    /** recreateMapperIfNeeded 在 mapper 为 null 时重建,返回是否执行了重建。 */
+    boolean recreateMapperIfNeeded() {
+        if (mapper == null) {
+            mapper = new ObjectMapper();
+            return true;
+        }
+        return false;
     }
 }

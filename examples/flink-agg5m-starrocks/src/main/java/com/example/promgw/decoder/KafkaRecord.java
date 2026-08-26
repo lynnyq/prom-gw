@@ -1,5 +1,6 @@
 package com.example.promgw.decoder;
 
+import java.io.Serializable;
 import java.util.Map;
 
 /**
@@ -13,8 +14,12 @@ import java.util.Map;
  * 为什么不用 Flink 内置的 ConsumerRecord?
  *   - 需要在算子间传递完整的 key+value+headers,内置类型不便于 POJO 序列化
  *   - 显式 POJO 便于单元测试
+ *
+ * 实现 {@link Serializable}:作为 DataStream 中的传输对象,需支持 Flink 序列化。
  */
-public class KafkaRecord {
+public class KafkaRecord implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     private byte[] key;
     private byte[] value;
     private String topic;

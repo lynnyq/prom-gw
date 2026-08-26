@@ -1,6 +1,7 @@
 package com.example.promgw.aggregate;
 
 import com.fasterxml.jackson.annotation.JsonFormat;
+import java.io.Serializable;
 import java.util.Date;
 import java.util.Map;
 
@@ -11,8 +12,13 @@ import java.util.Map;
  *   ts, metric, tenant, business, ingest_city, source_dc, labels_hash,
  *   labels, sample_count, value_sum, value_max, value_min, value_avg,
  *   value_p50, value_p99, ingest_time
+ *
+ * 实现 {@link Serializable}:本类用于 BufferingStarRocksSink 的 ListState<AggResult>
+ * checkpoint 状态,Flink checkpoint 时会序列化状态对象。
  */
-public class AggResult {
+public class AggResult implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     /** 5min 窗口起始时间(UTC+8) */
     @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
     private Date ts;

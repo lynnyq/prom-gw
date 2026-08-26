@@ -44,7 +44,10 @@ public class JobConfig {
     public long srBatchIntervalMs = 10_000L;    // 攒批时间上限(ms),超时即 flush
 
     // DLQ
-    public String dlqBootstrapServers = "localhost:9092";
+    // dlqBootstrapServers 默认空:未显式指定时回落到 kafkaBrokers(本架构 DLQ 与
+    // 消费集群同为本城 Kafka)。此前硬编码 localhost:9092 且无 CLI 参数可覆盖,
+    // 生产环境任何一批写入失败走 DLQ 时都会连不上 broker → 阻塞 60s → 作业重启循环。
+    public String dlqBootstrapServers = "";
     public String dlqTopic = "prom.local.dlq.sr.5m";
     public boolean dlqEnabled = true;
 
@@ -53,6 +56,9 @@ public class JobConfig {
     public long checkpointIntervalMs = 60_000L;
     public String checkpointPath = "file:///tmp/flink-checkpoints";
     public long allowedLatenessMs = 30_000L;       // 30s
+    // watermark 空闲检测:上游 subtask 超过该时长无数据则标记 idle,
+    // 不再阻塞全局 watermark 推进(防止空闲 subtask 卡死 5min 窗口)
+    public long watermarkIdlenessMs = 60_000L;     // 60s
     public int aggParallelism = 4;
 
     /** fromArgs 从命令行参数解析配置,支持 --env local/prod 预设。 */
@@ -101,6 +107,9 @@ public class JobConfig {
                 case "--sr-batch-interval-ms":
                     cfg.srBatchIntervalMs = Long.parseLong(next(args, ++i));
                     break;
+                case "--dlq-bootstrap-servers":
+                    cfg.dlqBootstrapServers = next(args, ++i);
+                    break;
                 case "--dlq-topic":
                     cfg.dlqTopic = next(args, ++i);
                     break;
@@ -125,6 +134,9 @@ public class JobConfig {
                 case "--allowed-lateness-ms":
                     cfg.allowedLatenessMs = Long.parseLong(next(args, ++i));
                     break;
+                case "--watermark-idleness-ms":
+                    cfg.watermarkIdlenessMs = Long.parseLong(next(args, ++i));
+                    break;
                 case "--kafka-start-from":
                     cfg.kafkaStartFrom = next(args, ++i);
                     break;
@@ -137,6 +149,10 @@ public class JobConfig {
                 default:
                     // 忽略未知参数
             }
+        }
+        // DLQ broker 未显式指定时回落到消费集群(本架构 DLQ 与消费集群同为本城 Kafka)
+        if (cfg.dlqBootstrapServers == null || cfg.dlqBootstrapServers.isEmpty()) {
+            cfg.dlqBootstrapServers = cfg.kafkaBrokers;
         }
         return cfg;
     }

@@ -30,10 +30,25 @@ import org.slf4j.LoggerFactory;
  * Temporary Redirect,通过 Location 响应头指向具体 BE。Apache HttpClient
  * 默认不对 PUT 做 307 跟随(仅 GET/HEAD),因此本客户端手动处理 307:
  * 读取 Location 头后用相同 body 与 headers 向 BE 重新发起 PUT。
+ *
+ * 响应体校验(关键):StarRocks 数据导入失败(类型不匹配/列缺失/全部行被过滤)
+ * 时 HTTP 仍返回 200,失败信息只在响应体 JSON 的 "Status" 字段里。
+ * 因此必须解析响应体,校验 Status 与 NumberLoadedRows,不能只看 HTTP 码。
  */
 public class StarRocksStreamLoadClient implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksStreamLoadClient.class);
+
+    /** 用于解析 Stream Load 响应体 JSON,ObjectMapper 无状态,可静态复用。 */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** Status="Publish Timeout":事务已提交仅发布超时,数据最终可见,视为成功。 */
+    private static final String STATUS_PUBLISH_TIMEOUT = "Publish Timeout";
+
+    /** Status="Label Already Exists":同 label 重复提交(网络超时后重试),事务已提交,视为成功。 */
+    private static final String STATUS_LABEL_ALREADY_EXISTS = "Label Already Exists";
+
+    private static final String STATUS_SUCCESS = "Success";
 
     /** 最大重定向次数(防止循环重定向,StarRocks 正常只有一次 FE→BE) */
     private static final int MAX_REDIRECTS = 5;
@@ -42,7 +57,6 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
     private final String authHeader;
     private final RequestConfig requestConfig;
     private final CloseableHttpClient client;
-    private final ObjectMapper responseMapper = new ObjectMapper();
 
     /** 默认超时 60s(Stream Load 大批量写入可能较慢) */
     private static final int DEFAULT_TIMEOUT_MS = 60_000;
@@ -134,23 +148,27 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
     }
 
     /**
-     * validateLoadResult 校验 Stream Load 响应 JSON 的 Status 字段。
+     * validateLoadResult 校验 Stream Load 响应 JSON 的 Status 与行数统计。
      *
      * StarRocks 返回 HTTP 200 时,实际结果在 body 的 Status 中:
-     *   "Success"        — 全部行写入成功
-     *   "Publish Timeout" — 事务已提交但发布到 BE 超时,数据可能不可见
-     *   "Fail"           — 写入失败(数据被拒绝)
+     *   "Success"             — 全部行写入成功
+     *   "Publish Timeout"     — 事务已提交仅发布超时,数据最终可见,视为成功
+     *   "Label Already Exists" — 同 label 重复提交(网络超时后重试),事务已提交,视为成功
+     *   "Fail" / 其他          — 写入失败(数据被拒绝),抛 IOException
      *
-     * Status 非 Success 时抛 IOException,由 StarRocksSink.invoke 重试或写 DLQ。
+     * Status 非成功时抛 IOException,由 StarRocksSink/BatchingSink 重试或写 DLQ。
      * 同 label 重试是安全的:StarRocks 对同 label 请求做幂等去重。
      *
-     * 额外检查 NumberLoadedRows < NumberTotalRows(质量过滤导致的部分行丢弃),
-     * 记 warn 但不抛异常(这是 StarRocks 的正常 quality filter 行为)。
+     * 行数校验:
+     *   - NumberLoadedRows == 0 且 NumberTotalRows > 0:全部行被过滤(典型原因:
+     *     列类型不匹配、labels 列格式错误)→ 抛异常。不抛会静默丢掉整批数据,
+     *     作业看起来正常但 StarRocks 永远查不到(线上已发生过)。
+     *   - 部分 filtered(0 < loaded < total):quality filter 正常行为,记 warn。
      */
     private void validateLoadResult(String result, String label) throws IOException {
         JsonNode root;
         try {
-            root = responseMapper.readTree(result);
+            root = MAPPER.readTree(result);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IOException("Stream Load response parse error: label=" + label
                     + ", resp=" + result, e);
@@ -161,16 +179,27 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
             LOG.warn("Stream Load response missing Status field, assuming success: label={}", label);
             return;
         }
-        if (!"Success".equalsIgnoreCase(status)) {
+        boolean ok = STATUS_SUCCESS.equalsIgnoreCase(status)
+                || STATUS_PUBLISH_TIMEOUT.equalsIgnoreCase(status)
+                || STATUS_LABEL_ALREADY_EXISTS.equalsIgnoreCase(status);
+        if (!ok) {
             String message = root.path("Message").asText("");
             throw new IOException("Stream Load failed: label=" + label
                     + ", Status=" + status + ", Message=" + message
                     + ", resp=" + result);
         }
-        // 部分行被质量过滤丢弃(正常行为,记 warn)
         long totalRows = root.path("NumberTotalRows").asLong(0);
         long loadedRows = root.path("NumberLoadedRows").asLong(totalRows);
+        if (totalRows > 0 && loadedRows == 0) {
+            // 全部行被过滤:批内数据一条都没落库,必须抛异常走重试/DLQ
+            long filtered = root.path("NumberFilteredRows").asLong(0);
+            String errorUrl = root.path("ErrorURL").asText("");
+            throw new IOException("Stream Load loaded 0/" + totalRows + " rows, all filtered: label="
+                    + label + ", filtered=" + filtered + ", ErrorURL=" + errorUrl
+                    + ", resp=" + result);
+        }
         if (totalRows > 0 && loadedRows < totalRows) {
+            // 部分行被质量过滤丢弃(正常行为,记 warn 便于观察)
             long filtered = root.path("NumberFilteredRows").asLong(0);
             LOG.warn("Stream Load partial success: label={}, loaded={}/{}, filtered={}",
                     label, loadedRows, totalRows, filtered);

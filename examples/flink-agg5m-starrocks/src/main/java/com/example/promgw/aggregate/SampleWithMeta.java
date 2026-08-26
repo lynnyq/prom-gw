@@ -1,5 +1,6 @@
 package com.example.promgw.aggregate;
 
+import java.io.Serializable;
 import java.util.Map;
 
 /**
@@ -7,8 +8,12 @@ import java.util.Map;
  *
  * 由 ExpandWriteRequest 把 PromSample(含 N 个 series)展开为 N 条 SampleWithMeta,
  * 每条对应一个 series 的一个 sample point。
+ *
+ * 实现 {@link Serializable}:作为 DataStream 中的传输对象,需支持 Flink 序列化。
  */
-public class SampleWithMeta {
+public class SampleWithMeta implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     private String tenant;
     private String metric;
     private Map<String, String> labels;

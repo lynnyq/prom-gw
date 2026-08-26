@@ -74,6 +74,7 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
     private transient Counter flushSuccessCounter;
     private transient Counter flushFailureCounter;
     private transient Counter dlqRowsCounter;
+    private transient Counter dlqDropRowsCounter;
 
     // --- checkpoint state ---
     private transient ListState<AggResult> checkpointBuffer;
@@ -113,6 +114,8 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
                 .addGroup("promgw").counter("srFlushFailure");
         dlqRowsCounter = getRuntimeContext().getMetricGroup()
                 .addGroup("promgw").counter("srDlqRows");
+        dlqDropRowsCounter = getRuntimeContext().getMetricGroup()
+                .addGroup("promgw").counter("srDlqDropRows");
 
         if (dlqHandler != null) {
             dlqHandler.open();
@@ -191,7 +194,13 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
     /**
      * sendRowsToDlq 把 buffer 中每行单独发到 DLQ。
      * 用行级 label(含完整 labels_hash),DLQ 消费者可按行重试。
-     * DLQ send 已改为同步(KafkaDlqHandler.send),失败抛异常 → 触发 checkpoint 失败 → 重启。
+     *
+     * 容错策略(修复:DLQ 故障不能拖死主链路):
+     *   逐行 try/catch,单行 DLQ 发送失败仅记 ERROR + srDlqDropRows 计数器,
+     *   不向上抛异常。修复前 send 失败直接传播 → invoke/snapshotState 抛异常 →
+     *   checkpoint 失败 → 作业无限重启,主链路完全停摆(线上已发生:
+     *   DLQ broker 配错为 localhost:9092,任何一批写入失败即卡死)。
+     *   DLQ 是兜底通道,其可用性通过 srDlqDropRows 指标告警保障,不应阻塞写入。
      */
     private void sendRowsToDlq(String error) throws Exception {
         if (dlqHandler == null) {
@@ -199,11 +208,22 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
             dlqRowsCounter.inc(buffer.size());
             return;
         }
+        int dropped = 0;
         for (AggResult r : buffer) {
             String rowLabel = buildRowLabel(r);
             String rowJson = mapper.writeValueAsString(r);
-            dlqHandler.send(rowLabel, rowJson, error);
-            dlqRowsCounter.inc();
+            try {
+                dlqHandler.send(rowLabel, rowJson, error);
+                dlqRowsCounter.inc();
+            } catch (Exception dlqErr) {
+                dropped++;
+                LOG.error("DLQ send failed, row dropped (watch srDlqDropRows metric): label={}",
+                        rowLabel, dlqErr);
+            }
+        }
+        if (dropped > 0) {
+            dlqDropRowsCounter.inc(dropped);
+            LOG.error("DLQ unavailable, dropped {}/{} rows in this batch", dropped, buffer.size());
         }
     }
 

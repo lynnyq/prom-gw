@@ -18,6 +18,8 @@ class JobConfigTest {
         // StarRocks batch defaults
         assertThat(cfg.srBatchSize).isEqualTo(500);
         assertThat(cfg.srBatchIntervalMs).isEqualTo(10_000L);
+        // watermark idleness 默认 60s
+        assertThat(cfg.watermarkIdlenessMs).isEqualTo(60_000L);
     }
 
     @Test
@@ -88,6 +90,31 @@ class JobConfigTest {
     void testParseBatchIntervalMs() {
         JobConfig cfg = JobConfig.fromArgs(new String[]{"--sr-batch-interval-ms", "5000"});
         assertThat(cfg.srBatchIntervalMs).isEqualTo(5000L);
+    }
+
+    @Test
+    void testParseWatermarkIdlenessMs() {
+        JobConfig cfg = JobConfig.fromArgs(new String[]{"--watermark-idleness-ms", "120000"});
+        assertThat(cfg.watermarkIdlenessMs).isEqualTo(120_000L);
+    }
+
+    @Test
+    void testDlqBootstrapServersFallsBackToKafkaBrokers() {
+        // 未显式指定 --dlq-bootstrap-servers 时,回落到消费集群(修复:此前硬编码 localhost:9092)
+        JobConfig cfg = JobConfig.fromArgs(new String[]{
+                "--kafka-brokers", "kfcs-bdops-flow-kzx-0001:9092,kfcs-bdops-flow-kzx-0002:9092"
+        });
+        assertThat(cfg.dlqBootstrapServers).isEqualTo(
+                "kfcs-bdops-flow-kzx-0001:9092,kfcs-bdops-flow-kzx-0002:9092");
+    }
+
+    @Test
+    void testDlqBootstrapServersExplicitOverride() {
+        JobConfig cfg = JobConfig.fromArgs(new String[]{
+                "--kafka-brokers", "broker-a:9092",
+                "--dlq-bootstrap-servers", "dlq-broker:9092"
+        });
+        assertThat(cfg.dlqBootstrapServers).isEqualTo("dlq-broker:9092");
     }
 
     @Test

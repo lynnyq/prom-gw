@@ -34,10 +34,11 @@ public class DedupFunction extends KeyedProcessFunction<Integer, KafkaRecord, Pr
 
     private transient ValueState<Long> lastProcessedTs;
     private transient Counter decodeFailures;
-    private final PromWriteRequestDecoder decoder = new PromWriteRequestDecoder();
+    private transient PromWriteRequestDecoder decoder;
 
     @Override
     public void open(Configuration parameters) {
+        decoder = new PromWriteRequestDecoder();
         ValueStateDescriptor<Long> desc = new ValueStateDescriptor<>(
                 "lastProcessedTs", Types.LONG);
         lastProcessedTs = getRuntimeContext().getState(desc);

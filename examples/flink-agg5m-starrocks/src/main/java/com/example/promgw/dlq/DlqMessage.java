@@ -1,6 +1,7 @@
 package com.example.promgw.dlq;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import java.io.Serializable;
 
 /**
  * DlqMessage 写入 Kafka DLQ topic 的消息封装。
@@ -13,7 +14,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *   - timestamp: 写入 DLQ 的时间
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
-public class DlqMessage {
+public class DlqMessage implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     private String original;
     private String label;
     private String error;

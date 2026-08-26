@@ -90,11 +90,17 @@ public class Agg5mJob {
                 .name("expand-samples");
 
         // 6. 分配 watermark(事件时间 = prompb.Sample.timestamp,允许 30s 乱序)
+        //    withIdleness(关键):watermark 在 keyBy(payloadHash) 去重重分区之后分配,
+        //    若某个 subtask 分不到数据(hash 倾斜/dedup 丢弃重复消息后无输出),
+        //    下游窗口算子的 watermark = 所有上游 channel 的最小值 → 卡死 →
+        //    5min 事件时间窗口永不触发 → sink 一条数据都收不到。
+        //    withIdleness 让空闲 subtask 在超时后不再阻塞全局 watermark 推进。
         DataStream<SampleWithMeta> withWatermark = samples
                 .assignTimestampsAndWatermarks(
                         WatermarkStrategy
                                 .<SampleWithMeta>forBoundedOutOfOrderness(Duration.ofMillis(cfg.allowedLatenessMs))
                                 .withTimestampAssigner((rec, ts) -> rec.getTimestampMs())
+                                .withIdleness(Duration.ofMillis(cfg.watermarkIdlenessMs))
                 );
 
         // 7. keyBy(seriesKey) + 5min 窗口聚合

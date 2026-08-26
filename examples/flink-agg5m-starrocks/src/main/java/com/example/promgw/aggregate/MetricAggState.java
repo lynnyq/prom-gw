@@ -1,5 +1,6 @@
 package com.example.promgw.aggregate;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -9,8 +10,13 @@ import java.util.Map;
  *
  * 5min 窗口内同一 series 的所有 sample 累加到此结构,
  * 窗口触发时计算 avg/p50/p99 等聚合值。
+ *
+ * 实现 {@link Serializable}:作为 AggregateFunction 的累加器,Flink 会在
+ * checkpoint 时序列化窗口状态,累加器必须可序列化。
  */
-public class MetricAggState {
+public class MetricAggState implements Serializable {
+
+    private static final long serialVersionUID = 1L;
     /** 样本数 */
     public long count = 0;
     /** 值总和(用于 avg = sum/count) */
