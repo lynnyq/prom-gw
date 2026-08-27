@@ -132,10 +132,10 @@ prom-gw 设计为**无状态服务**,所有实例对等:
 
 #### 1.4.1 同 series 顺序保证(Kafka partition 亲和)
 
-每条 sample 的 Kafka message key 使用 `SeriesKey()`(FNV-1a 64 位 hash,对 tenant + metric + sorted labels 计算):
+每条 sample 的 Kafka message key 使用 `SeriesKey()`(FNV-1a 64 位 hash,对 business + metric + sorted labels 计算):
 
 ```
-SeriesKey = FNV-1a64(tenant + \x00 + metric + \x00 + label1=val1 + \x00 + label2=val2 + \x00 + ...)
+SeriesKey = FNV-1a64(business + \x00 + metric + \x00 + label1=val1 + \x00 + label2=val2 + \x00 + ...)
 ```
 
 pipeline 逐 sample 投递时把 SeriesKey 作为 Kafka key,使同一 series 的所有 sample 落到同一 partition,partition 内严格有序。即使不同 prom-gw 节点处理了同一 series 的不同请求,Kafka 的 partition 亲和性保证最终顺序。

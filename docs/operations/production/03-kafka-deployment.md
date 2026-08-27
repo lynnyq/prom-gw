@@ -1003,7 +1003,7 @@ watch -n 5 '/appdata/kafka/bin/kafka-topics.sh \
 | 网络隔离 | VPC + 安全组 | Kafka 9092 端口仅对 prom-gw / Flink 网段开放 |
 | 主机访问控制 | SSH key +堡垒机 | 限制可直接访问 Kafka 主机的人员 |
 | 监控审计 | JMX + 日志审计 | 监控异常连接和操作 |
-| 数据隔离 | Topic 命名规范 | 按 `prom.<city>.<stage>.<tenant>` 隔离不同业务数据 |
+| 数据隔离 | Topic 命名规范 | 按 `prom.<city>.<stage>.<business>` 隔离不同业务数据 |
 
 > **如需启用认证**,可参考 Kafka 官方文档添加 SASL/SSL 配置,本工程的 prom-gw 和 Flink 客户端已预留环境变量/参数接入点(见 **prom-gw 配置参考**(见 §9) 和 **Flink 生产部署**(见 §5))。
 

@@ -151,7 +151,7 @@ prom.<city>.<category>
 
 **数据 topic(prom-gw 同步写入)**
 
-prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清洗)+ route(按 team 分桶),直接将原始 snappy+protobuf body 写入对应的 topic。payload 未经修改,附加了路由 headers(`tenant`、`source_dc`、`ingest_city` 等)。
+prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清洗)+ route(按 team 分桶),直接将原始 snappy+protobuf body 写入对应的 topic。payload 未经修改,附加了路由 headers(`business`、`source_dc`、`ingest_city` 等)。
 
 | Topic | 写入方 | 路由规则 | 消费方 | 用途 |
 |-------|--------|---------|--------|------|
@@ -216,7 +216,7 @@ Prometheus
 ┌─────────────────────────────┐
 │ prom.bj.routed.core         │  ← prom-gw 直接写入
 │ prom.bj.routed.infra        │     payload = 原始 snappy+protobuf body
-│ prom.bj.routed.data         │     headers = {tenant, source_dc, ingest_city}
+│ prom.bj.routed.data         │     headers = {business, source_dc, ingest_city}
 │ prom.bj.routed.app_business │     (兜底桶)
 └─────────────────────────────┘
   │ Flink KafkaSource 消费
@@ -225,7 +225,7 @@ Prometheus
   │   3. 5min 窗口聚合
   │   4. Stream Load → StarRocks
   ▼
-StarRocks (sr_bj_metrics_5m 表)
+StarRocks (metrics_5m 表)
   │
   │ 若 Stream Load 失败 3 次
   ▼
@@ -346,7 +346,7 @@ Kafka topic (prom.<city>.routed.app_business)   ← prom-gw 写入的原始数�
     │   6. 失败 → 重试 3 次(1s/2s/4s 退避)
     │   7. 3 次仍失败 → 写入 DLQ topic(兜底,不丢数据)
     │
-    ├──→ 正常: StarRocks sr_bj_metrics_5m (3副本, 动态分区, 7天TTL)
+    ├──→ 正常: StarRocks metrics_5m (3副本, 动态分区, 7天TTL)
     │
     └──→ 异常: Kafka prom.<city>.dlq.sr.5m (死信队列,7天留存)
                 ↑ 由运维重放工具消费,重新 Stream Load 到 StarRocks
@@ -355,15 +355,15 @@ Kafka topic (prom.<city>.routed.app_business)   ← prom-gw 写入的原始数�
 ### 2.5 StarRocks 多级聚合
 
 ```
-sr_bj_metrics_5m  (TTL=7天)   ←── Flink 直接写入(三城跨城)
+metrics_5m  (TTL=7天)   ←── Flink 直接写入(三城跨城)
         │
         │ StarRocks 周期任务(每小时执行)
         ▼
-sr_bj_metrics_1h  (TTL=90天)  ←── INSERT INTO ... SELECT ... GROUP BY 1h
+metrics_1h  (TTL=90天)  ←── INSERT INTO ... SELECT ... GROUP BY 1h
         │
         │ StarRocks 周期任务(每天执行)
         ▼
-sr_bj_metrics_1d  (TTL=3年)   ←── INSERT INTO ... SELECT ... GROUP BY 1d
+metrics_1d  (TTL=3年)   ←── INSERT INTO ... SELECT ... GROUP BY 1d
 ```
 
 **为什么不用 ROLLUP 物化视图**:ROLLUP 与基础表共享分区生命周期,基础表分区被 drop 时 ROLLUP 数据一起被删除,无法实现 "5m 存 7 天、1d 存 3 年" 的多 TTL 需求。因此采用三张独立物理表,各自管理 `dynamic_partition` 生命周期。
@@ -388,7 +388,7 @@ Authorization: Bearer <token>
 #### 中间件链
 
 ```
-请求 → recoverer → requestID → realIP → rateLimit → auth → tenantRateLimit → handleWrite
+请求 → recoverer → requestID → realIP → rateLimit → auth → businessRateLimit → handleWrite
 ```
 
 - **recoverer**: panic 恢复,记录堆栈,返回 500
@@ -396,7 +396,7 @@ Authorization: Bearer <token>
 - **realIP**: 从 `X-Forwarded-For` 提取真实 IP
 - **rateLimit**: 全局限流(QPS / 字节)
 - **auth**: Bearer Token 校验(支持多 Token,从配置热加载)
-- **tenantRateLimit**: 按租户限流
+- **businessRateLimit**: 按business限流
 
 #### Body 处理
 
@@ -731,7 +731,7 @@ compression: zstd  # batch 级压缩
 #### 表设计
 
 ```sql
-CREATE TABLE sr_bj_metrics_5m (
+CREATE TABLE metrics_5m (
     ts DATETIME NOT NULL,
     city VARCHAR(16),
     source_dc VARCHAR(32),
@@ -760,9 +760,9 @@ PROPERTIES (
 
 | 表 | TTL | 数据来源 | 清理方式 |
 |----|-----|---------|---------|
-| `sr_bj_metrics_5m` | 7 天 | Flink Stream Load | dynamic_partition 自动 drop |
-| `sr_bj_metrics_1h` | 90 天 | StarRocks 周期任务(从 5m 聚合) | dynamic_partition |
-| `sr_bj_metrics_1d` | 3 年 | StarRocks 周期任务(从 1h 聚合) | dynamic_partition |
+| `metrics_5m` | 7 天 | Flink Stream Load | dynamic_partition 自动 drop |
+| `metrics_1h` | 90 天 | StarRocks 周期任务(从 5m 聚合) | dynamic_partition |
+| `metrics_1d` | 3 年 | StarRocks 周期任务(从 1h 聚合) | dynamic_partition |
 
 ### 3.8 高可用与负载均衡
 

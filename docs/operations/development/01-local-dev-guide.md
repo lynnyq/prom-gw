@@ -382,14 +382,14 @@ make build     # 产物:bin/prom-gw
 ```yaml
 tokens:
   "tk_app_business_dev":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.local.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.local.routed.infra
     rate_limit: 50000
 ```
@@ -403,7 +403,7 @@ tokens:
 ```yaml
 rulesets:
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.local.routed.app_business
     version: 1
     match:
@@ -523,7 +523,7 @@ curl -s http://127.0.0.1:8080/metrics | grep gateway_samples_total
 # 9. Admin API
 curl -s http://127.0.0.1:8082/v1/rulesets | jq
 curl -s http://127.0.0.1:8082/v1/stats | jq
-curl -s http://127.0.0.1:8082/v1/tenants | jq
+curl -s http://127.0.0.1:8082/v1/businesses | jq
 ```
 
 ### 6.3 手动写入单条 sample
@@ -605,8 +605,8 @@ curl -s http://127.0.0.1:8082/v1/rulesets | jq
 # 查看运行时统计
 curl -s http://127.0.0.1:8082/v1/stats | jq
 
-# 查看租户列表
-curl -s http://127.0.0.1:8082/v1/tenants | jq
+# 查看业务列表
+curl -s http://127.0.0.1:8082/v1/businesses | jq
 
 # 热更新 ruleset
 curl -X PUT http://127.0.0.1:8082/v1/rulesets/app-business \
@@ -622,7 +622,7 @@ curl -X POST http://127.0.0.1:8082/v1/rulesets/app-business:reload
 ```bash
 M=http://127.0.0.1:8080/metrics
 
-# 总 sample 数(按 stage/tenant/status)
+# 总 sample 数(按 stage/business/status)
 curl -s $M | grep gateway_samples_total
 
 # Kafka 写入字节

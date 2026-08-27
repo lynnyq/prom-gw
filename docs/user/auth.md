@@ -5,7 +5,7 @@
 ## 1. Token 申请
 
 联系运维(目前仅 `prom-gw-admin`),提供:
-- 业务名(tenant)
+- 业务名(business)
 - 需要的 rate_limit
 - 默认投递的 Kafka topic
 
@@ -30,19 +30,19 @@ tk_<team>_<env>_<random>
 ```yaml
 tokens:
   "tk_app_business_dev":
-    tenant: app-business         # 业务名,会作为 request 标签
-    tenant_id: "1001"            # 未来 IAM 主键
+    business: app-business         # 业务名,会作为 request 标签
+    business_id: "1001"            # 未来 IAM 主键
     default_topic: prom.raw.app_business
-    rate_limit: 80000            # 单租户 80K samples/s
+    rate_limit: 80000            # 单business 80K samples/s
 ```
 
 字段说明:
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `tenant` | ✓ | 业务名,进入 request 标签 |
-| `tenant_id` | | 未来 IAM 主键,v1 可空 |
+| `business` | ✓ | 业务名,进入 request 标签 |
+| `business_id` | | 未来 IAM 主键,v1 可空 |
 | `default_topic` | ✓ | 该 token 默认投递 topic |
-| `rate_limit` | | 单租户限流(samples/s),默认 = 全局配置 |
+| `rate_limit` | | 单business限流(samples/s),默认 = 全局配置 |
 
 ## 4. 客户端使用
 

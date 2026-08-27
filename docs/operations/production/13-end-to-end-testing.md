@@ -101,7 +101,7 @@ find /tmp/prom-gw-test-wal/ -name 'seg-*.log*' | wc -l  # 期望 ≥ 1
 # 10. Admin API
 curl -s http://127.0.0.1:8082/v1/rulesets | jq .
 curl -s http://127.0.0.1:8082/v1/stats | jq .
-curl -s http://127.0.0.1:8082/v1/tenants | jq .
+curl -s http://127.0.0.1:8082/v1/businesses | jq .
 
 # 清理
 kill $GW_PID

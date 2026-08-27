@@ -21,7 +21,7 @@
 **目标**:自研 RemoteWrite 协议网关(`prom-gw`),作为多机房 Prometheus 与数据中台之间的统一接入层,提供:
 
 - 高吞吐(单机 ≥ 1.5M samples/s 持续)
-- 多租户路由、按业务分 topic
+- 多业务路由、按业务分 topic
 - 标签/指标/采样/下采样/死值等多维清洗
 - 同城采集、同城计算、跨城汇聚到北京 StarRocks
 - 配置热更新
@@ -190,7 +190,7 @@ flowchart TB
 
 #### 2.2.2 资源清单(单台规格 × 数量)
 
-> **配套设计(三独立表 + 级联聚合方案)**:Flink 输出**仅 5 min 聚合跨城**(每城 345 GB/天 gzip 压缩后,三城 1 TB/天,占 1G 专线 9.3%);1 h / 1 d 聚合由 StarRocks **周期任务**从 5m / 1h 表级联聚合,**不跨城**;**Kafka 3 天留存 + 3 副本 + 65% 上限,JBOD 12 × 16T/节点**(64C/512G 物理机,§2.2.6);StarRocks **三张独立物理表** `sr_bj_metrics_5m`(7 天)+ `sr_bj_metrics_1h`(90 天)+ `sr_bj_metrics_1d`(3 年),3 副本物理 ≈ 46.35 T(无需扩容)。
+> **配套设计(三独立表 + 级联聚合方案)**:Flink 输出**仅 5 min 聚合跨城**(每城 345 GB/天 gzip 压缩后,三城 1 TB/天,占 1G 专线 9.3%);1 h / 1 d 聚合由 StarRocks **周期任务**从 5m / 1h 表级联聚合,**不跨城**;**Kafka 3 天留存 + 3 副本 + 65% 上限,JBOD 12 × 16T/节点**(64C/512G 物理机,§2.2.6);StarRocks **三张独立物理表** `metrics_5m`(7 天)+ `metrics_1h`(90 天)+ `metrics_1d`(3 年),3 副本物理 ≈ 46.35 T(无需扩容)。
 >
 > **为何不用 ROLLUP**:ROLLUP 物化视图与基础表**共享分区生命周期**,基础表分区被 drop(如 5m 表 7 天清理)时,该分区的 `rollup_1h` / `rollup_1d` 数据**一起被删除**,无法实现"5m 存 7 天、1d 存 1 年"的多 TTL 需求。因此采用三张独立物理表,各自管理 `dynamic_partition` 生命周期,互不影响。
 
@@ -283,7 +283,7 @@ flowchart TB
 
 > 输入假设:**每城 30 T/天 Prometheus 远端写入(snappy 压缩后口径)**,全链路贯穿 `prom-gw → Kafka → Flink → StarRocks`。本节核算各环节磁盘需求是否匹配 §2.2.2 资源清单。
 >
-> **关键设计(三独立表 + 级联聚合方案,见 §4.5 / §4.6)**:Flink 在本城完成 5 min 滚动聚合,**仅 5 min 主体跨城写入北京 StarRocks `sr_bj_metrics_5m`**;**1 h / 1 d 聚合通过 StarRocks 周期任务(INSERT INTO ... SELECT)从 5m / 1h 表级联聚合**,写入独立物理表 `sr_bj_metrics_1h` / `sr_bj_metrics_1d`,各自管理分区 TTL,互不影响。这使 StarRocks 同时具备 5 min 精度告警(7 天)+ 1 h 趋势(90 天)+ 1 d 长期报表(3 年)能力,跨城流量与磁盘代价在可接受范围。
+> **关键设计(三独立表 + 级联聚合方案,见 §4.5 / §4.6)**:Flink 在本城完成 5 min 滚动聚合,**仅 5 min 主体跨城写入北京 StarRocks `metrics_5m`**;**1 h / 1 d 聚合通过 StarRocks 周期任务(INSERT INTO ... SELECT)从 5m / 1h 表级联聚合**,写入独立物理表 `metrics_1h` / `metrics_1d`,各自管理分区 TTL,互不影响。这使 StarRocks 同时具备 5 min 精度告警(7 天)+ 1 h 趋势(90 天)+ 1 d 长期报表(3 年)能力,跨城流量与磁盘代价在可接受范围。
 >
 > **为何不用 ROLLUP**:ROLLUP 与基础表共享分区生命周期,基础表分区 drop 时 ROLLUP 数据一并删除,无法实现"5m 存 7 天、1d 存 1 年"的多 TTL。三独立表 + 周期任务是业界多 TTL 的标准做法。
 
@@ -334,11 +334,11 @@ RocksDB 落盘 ≈ 32 × 2.5(含 SST/索引/WAL) ≈ 80 GB
 
 > **为何 t-digest 开销大**:5m 表 schema 含 `value_p50` / `value_p99`(§4.5),Flink 必须在窗口内计算分位数。p50/p99 不具备线性可加性,需用 t-digest 近似结构保存样本分布;单个 t-digest(compression=100)state 约 1-2 KB,两个分位数合并约 2-4 KB/series。若改用"保存全部 20 个原始 sample 再计算分位",state 约 20 × 24B = 480 B/series(更小但无法增量合并,且窗口内 sample 数波动时 state 不稳定)。本设计选用 t-digest 以支持后续 1h/1d 级联聚合时的跨窗口合并。
 
-即使按 10× 保守系数预留(异常窗口/扩缩容),单 TM state 可达 800 GB,**超出 500 GB SSD 规格**。实际建议:(1) t-digest `compression` 调到 50(state 减半至 ~16 GB,10× 后 160 GB,500 GB 够用);(2) 按 tenant 分拆多个 Flink 作业降低单 TM state 压力;(3) RocksDB 增量 checkpoint + 异步推 HDFS,本地仅保留最近 2 个 checkpoint。
+即使按 10× 保守系数预留(异常窗口/扩缩容),单 TM state 可达 800 GB,**超出 500 GB SSD 规格**。实际建议:(1) t-digest `compression` 调到 50(state 减半至 ~16 GB,10× 后 160 GB,500 GB 够用);(2) 按 business 分拆多个 Flink 作业降低单 TM state 压力;(3) RocksDB 增量 checkpoint + 异步推 HDFS,本地仅保留最近 2 个 checkpoint。
 
 **L2a 5 min 跨城聚合的特别说明**:5 min 滚动是基于原始 sample(15s 一次,窗口内 20 个 sample)直接计算,触发时**仅 Stream Load 当前 5 min 窗口的 1 批数据**(单城 1000 万 series ≈ 230 B/行 × 1000w = 2.3 GB/批,288 批/天)。state 中保存 5 min 窗口内的 sample 累积值,5 min 触发后**状态清零**(滚动窗口),state 大小可控。
 
-**结论**:Flink 磁盘在 t-digest `compression=50` 调优后充足(单 TM ~160 GB state + 50 GB checkpoint + 10 GB 日志 ≈ 220 GB < 500 GB);默认 `compression=100` 下需按 tenant 拆分作业或扩 TM 数。**瓶颈在 t-digest state,非原始数据落盘**。
+**结论**:Flink 磁盘在 t-digest `compression=50` 调优后充足(单 TM ~160 GB state + 50 GB checkpoint + 10 GB 日志 ≈ 220 GB < 500 GB);默认 `compression=100` 下需按 business 拆分作业或扩 TM 数。**瓶颈在 t-digest state,非原始数据落盘**。
 
 ##### (3) Kafka 磁盘 ✅ 满足 3 天留存 + 65% 上限(JBOD 方案)
 
@@ -498,7 +498,7 @@ RocksDB 落盘 ≈ 32 × 2.5(含 SST/索引/WAL) ≈ 80 GB
 
 **关于"不存储原始 sample 明细"约束的落实(三独立表方案)**:
 
-- ✅ 表 DDL 定义三张独立物理表 `sr_bj_metrics_5m` / `sr_bj_metrics_1h` / `sr_bj_metrics_1d`,各自管理 `dynamic_partition` 生命周期
+- ✅ 表 DDL 定义三张独立物理表 `metrics_5m` / `metrics_1h` / `metrics_1d`,各自管理 `dynamic_partition` 生命周期
 - ✅ Flink 端只输出 5 min 聚合,无明细 / 1 h / 1 d 独立 Flink 输出作业
 - ✅ 1 h / 1 d 聚合由 StarRocks 周期任务(`INSERT INTO ... SELECT`)级联维护,不依赖 Flink
 - ✅ Nacos 配置 / 部署脚本加 lint:禁止跨城 Kafka topic 出现 `*.raw.*` / `*.detail.*` / `*.agg1h.*` 等
@@ -613,8 +613,8 @@ RocksDB 落盘 ≈ 32 × 2.5(含 SST/索引/WAL) ≈ 80 GB
 | Content-Encoding | `snappy`                                                                  |
 | Content-Type     | `application/x-protobuf`                                                  |
 | Body             | `prometheus.WriteRequest`                                                 |
-| Auth             | `Authorization: Bearer <tenant_token>`                                    |
-| Headers          | `X-Prometheus-Remote-Write-Version`, `X-Tenant`, `X-Source-DC`, `TraceID` |
+| Auth             | `Authorization: Bearer <business_token>`                                    |
+| Headers          | `X-Prometheus-Remote-Write-Version`, `X-Business`, `X-Source-DC`, `TraceID` |
 
 > 新增 `X-Source-DC` 头(Prometheus `external_labels` 注入),标识数据机房(东坝/马坡/南法信/五联/南湾/合肥),用于 `prom-gw` 富化 `source_dc` 标签。
 
@@ -654,8 +654,8 @@ RocksDB 落盘 ≈ 32 × 2.5(含 SST/索引/WAL) ≈ 80 GB
 
 支持两种模式(规则配置选择):
 
-- **模式 1:RemoteWrite 透传** - 透传 `WriteRequest` Protobuf,加 envelope (`tenant`, `source_dc`, `ingest_time_ms`, `ingest_dc`)
-- **模式 2:JSON Lines** - `{metric, labels, value, timestamp_ms, tenant, dc, source_dc}[]`
+- **模式 1:RemoteWrite 透传** - 透传 `WriteRequest` Protobuf,加 envelope (`business`, `source_dc`, `ingest_time_ms`, `ingest_dc`)
+- **模式 2:JSON Lines** - `{metric, labels, value, timestamp_ms, business, dc, source_dc}[]`
 
 默认模式 1。Envelope 中 `ingest_dc` 标识本条数据由哪座城市的 prom-gw 写入(便于 Flink/StarRocks 端追溯)。
 
@@ -664,29 +664,29 @@ RocksDB 落盘 ≈ 32 × 2.5(含 SST/索引/WAL) ≈ 80 GB
 同城 Kafka 内按城市分 namespace(topic 前缀包含城市),避免跨城运维误操作:
 
 ```
-prom.bj.raw.<tenant>          # 北京原始
-prom.bj.cleaned.<tenant>      # 北京清洗后
+prom.bj.raw.<business>          # 北京原始
+prom.bj.cleaned.<business>      # 北京清洗后
 prom.bj.routed.<business>     # 北京按业务路由
 prom.bj.agg.<business>        # 北京 Flink 聚合输出(供同城查询)
 
-prom.sz.raw.<tenant>          # 深圳原始
-prom.sz.cleaned.<tenant>
+prom.sz.raw.<business>          # 深圳原始
+prom.sz.cleaned.<business>
 prom.sz.routed.<business>
 prom.sz.agg.<business>
 
-prom.hf.raw.<tenant>          # 合肥原始
-prom.hf.cleaned.<tenant>
+prom.hf.raw.<business>          # 合肥原始
+prom.hf.cleaned.<business>
 prom.hf.routed.<business>
 prom.hf.agg.<business>
 ```
 
-每个 topic 默认 64 个分区(可在 config 中按 topic 覆盖),分区 key = `hash(tenant + metric_name + sorted_labels_hash)`,保证同 series 顺序写。
+每个 topic 默认 64 个分区(可在 config 中按 topic 覆盖),分区 key = `hash(business + metric_name + sorted_labels_hash)`,保证同 series 顺序写。
 
 ### 4.5 Flink 同城聚合 + 跨城写入(三独立表 + 级联聚合)
 
-每城 Flink 独立运行,消费本城 Kafka 的 `prom.<city>.cleaned.*` / `prom.<city>.routed.*`,**完成 5 min 滚动聚合后跨城写入北京 StarRocks `sr_bj_metrics_5m` 表**;**1 h / 1 d 聚合由 StarRocks 周期任务(INSERT INTO ... SELECT)从 5m / 1h 表级联聚合,写入独立物理表 `sr_bj_metrics_1h` / `sr_bj_metrics_1d`,不再由 Flink 端独立输出**。
+每城 Flink 独立运行,消费本城 Kafka 的 `prom.<city>.cleaned.*` / `prom.<city>.routed.*`,**完成 5 min 滚动聚合后跨城写入北京 StarRocks `metrics_5m` 表**;**1 h / 1 d 聚合由 StarRocks 周期任务(INSERT INTO ... SELECT)从 5m / 1h 表级联聚合,写入独立物理表 `metrics_1h` / `metrics_1d`,不再由 Flink 端独立输出**。
 
-> **为何不用 ROLLUP(重要纠正)**:ROLLUP 物化视图与基础表**共享分区生命周期**——当 `sr_bj_metrics_5m` 的某个分区被 drop(如 7 天清理),该分区对应的 `rollup_1h` / `rollup_1d` 数据**一起被删除**。因此"5m 存 7 天、1d 存 1 年"的多 TTL 需求**在 ROLLUP 模型下无法实现**。业界标准做法是**三张独立物理表**,各自管理 `dynamic_partition` 生命周期,通过周期任务级联聚合,互不影响。
+> **为何不用 ROLLUP(重要纠正)**:ROLLUP 物化视图与基础表**共享分区生命周期**——当 `metrics_5m` 的某个分区被 drop(如 7 天清理),该分区对应的 `rollup_1h` / `rollup_1d` 数据**一起被删除**。因此"5m 存 7 天、1d 存 1 年"的多 TTL 需求**在 ROLLUP 模型下无法实现**。业界标准做法是**三张独立物理表**,各自管理 `dynamic_partition` 生命周期,通过周期任务级联聚合,互不影响。
 
 **关键设计**:
 - ✅ **5 min 聚合主体跨城**(从本城到北京),支撑实时大屏/告警/事故复盘
@@ -699,16 +699,16 @@ prom.hf.agg.<business>
 
 | 层级 | 粒度 | 用途 | 落点 |
 |---|---|---|---|
-| L2a 5 min 滚动 | 5 min 窗口 | 同城实时查询、监控、告警 | 本城 Kafka `prom.<city>.agg5m.<business>`(留存 1–2 天,本地兜底) **+ 跨城 Stream Load 到北京 StarRocks `sr_bj_metrics_5m`(留存 7 天)** |
-| **L2b 1 h 聚合(独立表)** | **1 h 窗口** | **同城中长期排查、趋势分析** | **StarRocks `sr_bj_metrics_1h`(周期任务从 5m 表级联聚合,留存 90 天)** |
-| **L2c 1 d 聚合(独立表)** | **1 day 窗口** | **跨城长期趋势、容量规划、年报** | **StarRocks `sr_bj_metrics_1d`(周期任务从 1h 表级联聚合,留存 3 年)** |
+| L2a 5 min 滚动 | 5 min 窗口 | 同城实时查询、监控、告警 | 本城 Kafka `prom.<city>.agg5m.<business>`(留存 1–2 天,本地兜底) **+ 跨城 Stream Load 到北京 StarRocks `metrics_5m`(留存 7 天)** |
+| **L2b 1 h 聚合(独立表)** | **1 h 窗口** | **同城中长期排查、趋势分析** | **StarRocks `metrics_1h`(周期任务从 5m 表级联聚合,留存 90 天)** |
+| **L2c 1 d 聚合(独立表)** | **1 day 窗口** | **跨城长期趋势、容量规划、年报** | **StarRocks `metrics_1d`(周期任务从 1h 表级联聚合,留存 3 年)** |
 
 **Flink Job 拆分(简化)**:
 
 1. **A 作业:5 min 滚动 + Stream Load 跨城**(单一作业双输出)
    - 输入:同城 Kafka `prom.<city>.cleaned.*`
    - 5 min 窗口聚合 → 本城 Kafka `prom.<city>.agg5m.*`(本地兜底消费)
-   - 同一窗口结束触发时 → **Stream Load 写入北京 StarRocks `sr_bj_metrics_5m`**(Stream Load 失败本地重试 N 次 + 落 DLQ `prom.<city>.dlq.sr.5m`)
+   - 同一窗口结束触发时 → **Stream Load 写入北京 StarRocks `metrics_5m`**(Stream Load 失败本地重试 N 次 + 落 DLQ `prom.<city>.dlq.sr.5m`)
    - **1 h / 1 d 聚合不再由 Flink 独立作业输出**,完全交给 StarRocks 周期任务
 2. **B 作业:跨指标 join**(可选)
    - 跨指标 join(如 `kube_pod_info` × 业务指标,补全业务标签)
@@ -716,13 +716,12 @@ prom.hf.agg.<business>
 3. **C 作业:DLQ 重放**(运维工具)
    - 监听 `prom.<city>.dlq.sr.5m`,定期重放失败批次到 StarRocks
 
-**5 min 表输出 schema(写入 StarRocks `sr_bj_metrics_5m`)**:
+**5 min 表输出 schema(写入 StarRocks `metrics_5m`)**:
 
 ```json
 {
   "ts":           "2026-08-03T14:25:00",
   "metric":       "http_request_duration_seconds",
-  "tenant":       "app-business",
   "business":     "payment",
   "ingest_city":  "sz",
   "source_dc":    "五联",
@@ -738,7 +737,7 @@ prom.hf.agg.<business>
 }
 ```
 
-> **labels_hash 计算**:Flink 端对 labels 的 key 按字典序排序后拼接,用 XXH3 计算稳定 hash(`XXH3(sorted_kvs)`),作为 StarRocks PK 键列。保证相同 labels 产生相同 hash,支持去重;hash 碰撞概率极低(64 位 hash,1000 万 series 碰撞概率 < 10⁻¹⁵)。
+> **labels_hash 计算**:Flink 端对 labels 的 key 按字典序排序后拼接,用 SHA-1 计算稳定 hash(`SHA-1(sorted_kvs)`),作为 StarRocks PK 键列。保证相同 labels 产生相同 hash,支持去重;hash 碰撞概率极低(160 位 hash,1000 万 series 碰撞概率 < 10⁻³⁰)。
 
 单 series × 5 min ≈ 230 字节(明细未压缩);**1 城 × 1000 万 series × 5 min = 2.3 GB/批,288 批/天 ≈ 660 GB/天**(逻辑未压缩)。**Stream Load 启用 HTTP `Content-Encoding: gzip`**,压缩比 ~1.9×,实际跨城传输 ≈ 345 GB/天/城。
 
@@ -749,28 +748,28 @@ prom.hf.agg.<business>
 - **并发控制**:每城 1 个独立 Stream Load Label,`bj_5m` / `sz_5m` / `hf_5m`,FE 自动负载均衡
 - **重试**:Stream Load 失败本地重试 N 次 + 落盘(spill to 本城 DLQ topic `prom.<city>.dlq.sr.5m`)
 - **标签注入**:Flink 输出样本统一注入 `ingest_city` / `source_dc` 标签,北京 StarRocks 可按城市切片查询
-- **写入单一 5m 表**:Flink 只写 `sr_bj_metrics_5m`;`sr_bj_metrics_1h` / `sr_bj_metrics_1d` 由 StarRocks 周期任务填充,Flink 不重复写
+- **写入单一 5m 表**:Flink 只写 `metrics_5m`;`metrics_1h` / `metrics_1d` 由 StarRocks 周期任务填充,Flink 不重复写
 
 **StarRocks 周期任务级联聚合机制**(替代 ROLLUP):
 
 ```
 Flink 5 min 窗口触发
-  ↓ Stream Load 写入 sr_bj_metrics_5m
+  ↓ Stream Load 写入 metrics_5m
 
 StarRocks 周期任务(每小时执行一次):
-  ↓ INSERT INTO sr_bj_metrics_1h SELECT ... FROM sr_bj_metrics_5m
+  ↓ INSERT INTO metrics_1h SELECT ... FROM metrics_5m
   ↓   WHERE ts >= 上一个小时 AND ts < 当前小时
-  ↓   GROUP BY date_trunc('hour', ts), metric, tenant, ...
+  ↓   GROUP BY date_trunc('hour', ts), metric, business, ...
 
 StarRocks 周期任务(每天执行一次):
-  ↓ INSERT INTO sr_bj_metrics_1d SELECT ... FROM sr_bj_metrics_1h
+  ↓ INSERT INTO metrics_1d SELECT ... FROM metrics_1h
   ↓   WHERE ts >= 昨天 AND ts < 今天
-  ↓   GROUP BY date_trunc('day', ts), metric, tenant, ...
+  ↓   GROUP BY date_trunc('day', ts), metric, business, ...
 
 查询时:应用层按时间范围选表
-  - 近 7 天 / 5 min 步长     → 查 sr_bj_metrics_5m
-  - 7-90 天 / 1 h 步长       → 查 sr_bj_metrics_1h
-  - > 90 天 / 1 d 步长       → 查 sr_bj_metrics_1d
+  - 近 7 天 / 5 min 步长     → 查 metrics_5m
+  - 7-90 天 / 1 h 步长       → 查 metrics_1h
+  - > 90 天 / 1 d 步长       → 查 metrics_1d
 ```
 
 > **级联而非跳级**:1d 聚合从 1h 表聚合(而非从 5m 直跳 1d),扫描量最小:1h 表每天仅 66 GB,5m 表每天 1 TB。级联链路 5m→1h→1d 每级数据量降 15×,CPU 开销可控。
@@ -780,23 +779,23 @@ StarRocks 周期任务(每天执行一次):
 ```sql
 -- 近 1 小时 QPS 趋势 → 查 5m 表(精确 5 min)
 SELECT date_trunc('minute', ts), sum(value_sum) / sum(sample_count) AS qps
-FROM sr_bj_metrics_5m
+FROM metrics_5m
 WHERE ts >= now() - interval 1 hour
   AND metric = 'http_requests_total'
 GROUP BY date_trunc('minute', ts);
 
 -- 7-90 天趋势 → 查 1h 表
 SELECT date_trunc('hour', ts), sum(value_sum) / sum(sample_count) AS qps
-FROM sr_bj_metrics_1h
+FROM metrics_1h
 WHERE ts >= now() - interval 7 day
   AND metric = 'http_requests_total'
 GROUP BY date_trunc('hour', ts);
 
 -- 年度容量规划 → 查 1d 表
 SELECT date_trunc('day', ts), sum(value_sum) AS daily_total
-FROM sr_bj_metrics_1d
+FROM metrics_1d
 WHERE ts >= now() - interval 1 year
-  AND tenant = 'app-business'
+  AND business = 'app-business'
 GROUP BY date_trunc('day', ts);
 ```
 
@@ -808,7 +807,7 @@ GROUP BY date_trunc('day', ts);
 |---|---|---|
 | Flink 作业数 | 3 个(L2a/L2b/L2c) | 1 个(L2a,1h/1d 由 SR 周期任务维护) |
 | 跨城写入量 | 8.7 GB/天(仅 L2c) | 1 TB/天(L2a 主体,详 §2.2.6) |
-| 跨城写入表数 | 1 张(sr_bj_agg_daily) | 1 张(sr_bj_metrics_5m) |
+| 跨城写入表数 | 1 张(sr_bj_agg_daily) | 1 张(metrics_5m) |
 | StarRocks 表数 | 1 张 | 3 张独立物理表(各自 TTL) |
 | 实时告警支持 | 弱(只有日聚合) | **强(5 min 主体直接查)** |
 | 事故复盘精度 | 日级(看不到尖刺) | **5 min 级(精准定位 spike)** |
@@ -819,14 +818,14 @@ GROUP BY date_trunc('day', ts);
 
 **L2a vs L2b/L2c 的存储边界**:
 
-- **L2a 5 min 主体**:跨城写入 StarRocks `sr_bj_metrics_5m`,**留存 7 天**;同时落本城 Kafka `prom.<city>.agg5m.*` 留存 1-2 天作为本地兜底
-- **sr_bj_metrics_1h**:StarRocks 周期任务从 5m 表每小时级联聚合,**留存 90 天**
-- **sr_bj_metrics_1d**:StarRocks 周期任务从 1h 表每天级联聚合,**留存 3 年**
+- **L2a 5 min 主体**:跨城写入 StarRocks `metrics_5m`,**留存 7 天**;同时落本城 Kafka `prom.<city>.agg5m.*` 留存 1-2 天作为本地兜底
+- **metrics_1h**:StarRocks 周期任务从 5m 表每小时级联聚合,**留存 90 天**
+- **metrics_1d**:StarRocks 周期任务从 1h 表每天级联聚合,**留存 3 年**
 - 明细(原始 sample 15s 一次)**不写入 StarRocks**,仅在 prom-gw 解码后直传 Kafka,城市查询走本城 Kafka / 本地 OLAP,与北京 StarRocks 解耦
 
 ### 4.6 StarRocks 表模型(北京 · 三独立表 + 级联聚合)
 
-> **设计原则(三独立表方案)**:StarRocks 持有**三张独立物理表**——`sr_bj_metrics_5m`(Flink 跨城写入)、`sr_bj_metrics_1h`(周期任务从 5m 级联聚合)、`sr_bj_metrics_1d`(周期任务从 1h 级联聚合)。三表各自管理 `dynamic_partition` 生命周期,互不影响,实现"5m 存 7 天、1h 存 90 天、1d 存 3 年"的多 TTL 需求。
+> **设计原则(三独立表方案)**:StarRocks 持有**三张独立物理表**——`metrics_5m`(Flink 跨城写入)、`metrics_1h`(周期任务从 5m 级联聚合)、`metrics_1d`(周期任务从 1h 级联聚合)。三表各自管理 `dynamic_partition` 生命周期,互不影响,实现"5m 存 7 天、1h 存 90 天、1d 存 3 年"的多 TTL 需求。
 >
 > **为何不用 ROLLUP**:ROLLUP 与基础表共享分区生命周期,基础表分区 drop 时 ROLLUP 一并删除,无法实现多 TTL。详见 §4.5 说明。
 >
@@ -841,15 +840,14 @@ GROUP BY date_trunc('day', ts);
 ```sql
 -- ===== 1) 5 min 表:Flink 跨城 Stream Load 唯一写入点,留存 7 天 =====
 -- PRIMARY KEY 模型:Flink at-least-once 写入用 REPLACE INTO 自动去重
--- labels_hash:labels 的稳定 hash(XXH3),作为 PK 键列替代 MAP(MAP 不能作 PK 键列)
-CREATE TABLE sr_bj_metrics_5m (
+-- labels_hash:labels 的稳定 hash(SHA-1),作为 PK 键列替代 MAP(MAP 不能作 PK 键列)
+CREATE TABLE metrics_5m (
   ts            DATETIME     NOT NULL COMMENT '5 min 窗口起始时间(UTC+8)',
   metric        VARCHAR(128) NOT NULL,
-  tenant        VARCHAR(64)  NOT NULL,
   business      VARCHAR(64)  NOT NULL,
   ingest_city   VARCHAR(16)  NOT NULL COMMENT 'bj/sz/hf',
   source_dc     VARCHAR(32)  NOT NULL COMMENT '东坝/马坡/南法信/五联/南湾/合肥',
-  labels_hash   VARCHAR(64)  NOT NULL COMMENT 'labels 的 XXH3 hash(Flink 端计算),作 PK 键列',
+  labels_hash   VARCHAR(64)  NOT NULL COMMENT 'labels 的 SHA-1 hash(Flink 端计算),作 PK 键列',
   labels        MAP<VARCHAR(64), VARCHAR(256)> COMMENT '原始 labels(非键列,仅查询用)',
   sample_count  BIGINT       NOT NULL COMMENT '窗口内原始样本数(15s 步长,5 min = 20 个)',
   value_sum     DOUBLE       NOT NULL COMMENT '窗口内 sum',
@@ -857,12 +855,11 @@ CREATE TABLE sr_bj_metrics_5m (
   value_min     DOUBLE                COMMENT '窗口内 min',
   value_avg     DOUBLE                COMMENT '窗口内 avg = sum/count',
   value_p50     DOUBLE                COMMENT '窗口内 p50',
-  value_p99     DOUBLE                COMMENT '窗口内 p99',
-  ingest_time   DATETIME     NOT NULL COMMENT '入 StarRocks 时间(DLQ 重放去重用)'
+  value_p99     DOUBLE                COMMENT '窗口内 p99'
 ) ENGINE=OLAP
-  PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
   PARTITION BY RANGE(ts) ()
-  DISTRIBUTED BY HASH(metric, tenant) BUCKETS 32
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 32
   PROPERTIES (
     "storage_medium" = "SSD",
     "dynamic_partition.enable" = "true",
@@ -876,10 +873,9 @@ CREATE TABLE sr_bj_metrics_5m (
   );
 
 -- ===== 2) 1 h 表:周期任务从 5m 表级联聚合,留存 90 天 =====
-CREATE TABLE sr_bj_metrics_1h (
+CREATE TABLE metrics_1h (
   ts            DATETIME     NOT NULL COMMENT '1 h 窗口起始时间(UTC+8)',
   metric        VARCHAR(128) NOT NULL,
-  tenant        VARCHAR(64)  NOT NULL,
   business      VARCHAR(64)  NOT NULL,
   ingest_city   VARCHAR(16)  NOT NULL,
   source_dc     VARCHAR(32)  NOT NULL,
@@ -891,12 +887,11 @@ CREATE TABLE sr_bj_metrics_1h (
   value_min     DOUBLE,
   value_avg     DOUBLE,
   value_p50     DOUBLE       COMMENT 'percentile_approx 跨窗口合并',
-  value_p99     DOUBLE,
-  ingest_time   DATETIME     NOT NULL
+  value_p99     DOUBLE
 ) ENGINE=OLAP
-  PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
   PARTITION BY RANGE(ts) ()
-  DISTRIBUTED BY HASH(metric, tenant) BUCKETS 16
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 16
   PROPERTIES (
     "storage_medium" = "SSD",
     "dynamic_partition.enable" = "true",
@@ -910,10 +905,9 @@ CREATE TABLE sr_bj_metrics_1h (
   );
 
 -- ===== 3) 1 d 表:周期任务从 1h 表级联聚合,留存 3 年 =====
-CREATE TABLE sr_bj_metrics_1d (
+CREATE TABLE metrics_1d (
   ts            DATETIME     NOT NULL COMMENT '1 day 窗口起始时间(UTC+8)',
   metric        VARCHAR(128) NOT NULL,
-  tenant        VARCHAR(64)  NOT NULL,
   business      VARCHAR(64)  NOT NULL,
   ingest_city   VARCHAR(16)  NOT NULL,
   source_dc     VARCHAR(32)  NOT NULL,
@@ -925,12 +919,11 @@ CREATE TABLE sr_bj_metrics_1d (
   value_min     DOUBLE,
   value_avg     DOUBLE,
   value_p50     DOUBLE,
-  value_p99     DOUBLE,
-  ingest_time   DATETIME     NOT NULL
+  value_p99     DOUBLE
 ) ENGINE=OLAP
-  PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
   PARTITION BY RANGE(ts) ()
-  DISTRIBUTED BY HASH(metric, tenant) BUCKETS 8
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 8
   PROPERTIES (
     "storage_medium" = "SSD",
     "dynamic_partition.enable" = "true",
@@ -946,52 +939,50 @@ CREATE TABLE sr_bj_metrics_1d (
 -- ===== 4) 周期任务:5m → 1h 级联聚合(每小时执行一次) =====
 -- 用 INSERT OVERWRITE 覆盖目标小时分区,保证幂等(重跑不产生重复)
 -- 通过 StarRocks 内置调度(2.5+)或外部调度(DolphinScheduler / crontab)
-INSERT OVERWRITE sr_bj_metrics_1h
+INSERT OVERWRITE metrics_1h
 SELECT
     date_trunc('hour', ts) AS ts,
-    metric, tenant, business, ingest_city, source_dc, labels_hash, labels,
+    metric, business, ingest_city, source_dc, labels_hash, labels,
     SUM(sample_count) AS sample_count,
     SUM(value_sum) AS value_sum,
     MAX(value_max) AS value_max,
     MIN(value_min) AS value_min,
     SUM(value_sum) / SUM(sample_count) AS value_avg,
     percentile_approx(value_p50, 0.5) AS value_p50,
-    percentile_approx(value_p99, 0.99) AS value_p99,
-    NOW() AS ingest_time
-FROM sr_bj_metrics_5m
+    percentile_approx(value_p99, 0.99) AS value_p99
+FROM metrics_5m
 WHERE ts >= date_trunc('hour', NOW()) - INTERVAL 1 HOUR
   AND ts <  date_trunc('hour', NOW())
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 
 -- ===== 5) 周期任务:1h → 1d 级联聚合(每天执行一次) =====
-INSERT OVERWRITE sr_bj_metrics_1d
+INSERT OVERWRITE metrics_1d
 SELECT
     date_trunc('day', ts) AS ts,
-    metric, tenant, business, ingest_city, source_dc, labels_hash, labels,
+    metric, business, ingest_city, source_dc, labels_hash, labels,
     SUM(sample_count) AS sample_count,
     SUM(value_sum) AS value_sum,
     MAX(value_max) AS value_max,
     MIN(value_min) AS value_min,
     SUM(value_sum) / SUM(sample_count) AS value_avg,
     percentile_approx(value_p50, 0.5) AS value_p50,
-    percentile_approx(value_p99, 0.99) AS value_p99,
-    NOW() AS ingest_time
-FROM sr_bj_metrics_1h
+    percentile_approx(value_p99, 0.99) AS value_p99
+FROM metrics_1h
 WHERE ts >= date_trunc('day', NOW()) - INTERVAL 1 DAY
   AND ts <  date_trunc('day', NOW())
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 ```
 
 **三独立表设计关键点**:
-- **PRIMARY KEY 模型**:三表均用 PK 模型(`PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)`),支持 `REPLACE INTO` / `INSERT OVERWRITE` 去重,保证 Flink at-least-once 与周期任务幂等
-- **labels_hash 标量列**:labels 的 XXH3 hash(Flink 端计算),作为 PK 键列替代 MAP 类型(StarRocks PK/UK 键列不支持 MAP/ARRAY 等复杂类型);`labels` 仍保留为 MAP 列供查询,但不参与去重
+- **PRIMARY KEY 模型**:三表均用 PK 模型(`PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)`),支持 `REPLACE INTO` / `INSERT OVERWRITE` 去重,保证 Flink at-least-once 与周期任务幂等
+- **labels_hash 标量列**:labels 的 SHA-1 hash(Flink 端计算),作为 PK 键列替代 MAP 类型(StarRocks PK/UK 键列不支持 MAP/ARRAY 等复杂类型);`labels` 仍保留为 MAP 列供查询,但不参与去重
 - **`replicated_storage = true`**:PK 模型下写入仅写主副本,异步同步到从副本,提升跨城写吞吐
 - **各自 `dynamic_partition` 独立清理**:5m 表 7 天后自动 drop 分区,不影响 1h / 1d 表;1h 表 90 天后清理,不影响 1d 表
 - **级联而非跳级**:1d 从 1h 聚合(非从 5m 直跳),扫描量最小:1h 表 66 GB/天 vs 5m 表 1 TB/天
 - **`INSERT OVERWRITE` 保证幂等**:周期任务用 `INSERT OVERWRITE` 覆盖目标时间窗口数据,重跑不产生重复;PK 模型下即使部分写入也能按主键覆盖
 - **p50 / p99 用 `percentile_approx` 跨窗口聚合**:不具备线性可加性,用 t-digest 近似合并;注意这是"各窗口 p50/p99 的近似分位",非原始数据精确分位,仅作趋势参考
 - **周期任务调度**:StarRocks 2.5+ 内置 `CREATE JOB` 或外部 DolphinScheduler / crontab;失败重试由调度器保证
-- **查询路由**:应用层按时间范围选表(`sr_bj_metrics_5m` / `sr_bj_metrics_1h` / `sr_bj_metrics_1d`),StarRocks CBO 不跨独立表路由
+- **查询路由**:应用层按时间范围选表(`metrics_5m` / `metrics_1h` / `metrics_1d`),StarRocks CBO 不跨独立表路由
 - **BUCKETS 递减**:5m 表 32 桶(高并发写)、1h 表 16 桶、1d 表 8 桶(数据量小,减少 tablet 开销)
 
 #### 4.6.2 容量与保留(三独立表)
@@ -1062,10 +1053,10 @@ GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
 #### 4.6.3 Stream Load 与去重
 
 - **Stream Load 并发**:每城 1 个独立 Label,`bj_5m` / `sz_5m` / `hf_5m`,FE 自动负载均衡
-- **表模型**:三表均 `PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)`,支持 `REPLACE INTO` 自动去重
-- **去重主键**:`(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)`;Flink 端用 `REPLACE INTO`(at-least-once 安全);`labels_hash` 为 Flink 端计算的 XXH3 稳定 hash,替代 MAP 类型作键列
+- **表模型**:三表均 `PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)`,支持 `REPLACE INTO` 自动去重
+- **去重主键**:`(ts, metric, business, ingest_city, source_dc, labels_hash)`;Flink 端用 `REPLACE INTO`(at-least-once 安全);`labels_hash` 为 Flink 端计算的 SHA-1 稳定 hash,替代 MAP 类型作键列
 - **DLQ 重放**:`ingest_time` 字段支持按时间去重;Flink 端维护 `prom.<city>.dlq.sr.5m` topic,运维工具定期重放
-- **周期任务监控**:1h / 1d 级联聚合任务失败/落后时,通过调度器告警 + `SHOW DATA FROM TABLE sr_bj_metrics_1h` / `sr_bj_metrics_1d` 诊断;任务用 `INSERT OVERWRITE` 保证幂等(同窗口重跑覆盖,不产生重复)
+- **周期任务监控**:1h / 1d 级联聚合任务失败/落后时,通过调度器告警 + `SHOW DATA FROM TABLE metrics_1h` / `metrics_1d` 诊断;任务用 `INSERT OVERWRITE` 保证幂等(同窗口重跑覆盖,不产生重复)
 - **不写明细表 / 原始 sample 表**——15s 步长原始数据**只在本城 Kafka / 本地 OLAP**,StarRocks 仅供**跨城全粒度查询**(5 min / 1 h / 1 d)
 - **跨城流量监控**:`flink_cross_dc_bytes_total{topic_class=detail}` 出现 > 0 立即告警(防止 Flink 误把原始明细上跨城);该指标由 Flink exporter 暴露(跨城链路由 Flink → StarRocks,prom-gw 不参与)
 
@@ -1076,7 +1067,7 @@ GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
 ```yaml
 rulesets:
   - name: app-business-clean
-    tenant: app-business
+    business: app-business
     input_topic: prom.raw.app_business
     stages:
       - type: relabel
@@ -1180,7 +1171,7 @@ Config Center:
 
 ### 6.2 背压四道防线
 
-1. **应用层令牌桶限流** (默认 100K samples/s/instance,可通过 flag `--rate-limit` 调整;同时支持按租户维度动态下发限流配置)
+1. **应用层令牌桶限流** (默认 100K samples/s/instance,可通过 flag `--rate-limit` 调整;同时支持按业务维度动态下发限流配置)
 2. **有界 channel** (每个 stage 间 `chan []Sample`,容量 65535,满则 503)
 3. **本地磁盘 WAL** (`/data/wal/`,同城 Kafka 长期不可用时落盘,后台重放;磁盘使用达 80% 后转硬拒绝)
 4. **跨城 DLQ** (`prom.<city>.dlq.sr`,北京 StarRocks 短期不可写时,Flink 落本地 Kafka,告警 + 恢复后批量回放;持续不可用超过 30 分钟触发 P1 告警并启动应急回灌流程)
@@ -1198,7 +1189,7 @@ Config Center:
 | `retries`             | 10     | 客户端重试        |
 | `delivery.timeout.ms` | 120000 | 2 分钟硬上限      |
 
-**投递语义**:**At-least-once**。下游 (Flink) 需做幂等去重(主键 `ts + metric + tenant + business + ingest_city + source_dc + labels_hash`,与 StarRocks PK 对齐);Flink → StarRocks 的 Stream Load 同样 at-least-once,StarRocks 表使用 `PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)` + `REPLACE INTO` 自动去重。
+**投递语义**:**At-least-once**。下游 (Flink) 需做幂等去重(主键 `ts + metric + business + ingest_city + source_dc + labels_hash`,与 StarRocks PK 对齐);Flink → StarRocks 的 Stream Load 同样 at-least-once,StarRocks 表使用 `PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)` + `REPLACE INTO` 自动去重。
 
 ### 6.4 故障切换
 
@@ -1213,9 +1204,9 @@ Config Center:
 
 - **部署位置**:每城 1 台 ClickHouse(复用本城现有 Kafka 物理机或独立 VM)
 - **规格**:32C/128G/2T SSD(仅存 7 天 5min 聚合,单城 345 GB/天 × 7 = 2.4 TB,单副本够用)
-- **表结构**:`ch_<city>_metrics_5m`,schema 与 `sr_bj_metrics_5m` 一致(含 `labels_hash`),`MergeTree` 引擎按 `ts` 分区
+- **表结构**:`ch_<city>_metrics_5m`,schema 与 `metrics_5m` 一致(含 `labels_hash`),`MergeTree` 引擎按 `ts` 分区
 - **切换机制**:Flink 端配置双 sink(StarRocks + ClickHouse),正常仅写 StarRocks;StarRocks 不可写超 30min 时自动切 ClickHouse(通过 Flink SideOutput + 告警触发)
-- **回灌**:北京恢复后,从各城 ClickHouse `SELECT` 导出,通过 Stream Load 回灌北京 StarRocks `sr_bj_metrics_5m`(PK 模型 + REPLACE INTO 保证去重)
+- **回灌**:北京恢复后,从各城 ClickHouse `SELECT` 导出,通过 Stream Load 回灌北京 StarRocks `metrics_5m`(PK 模型 + REPLACE INTO 保证去重)
 - **Nacos 故障**:使用最后成功版本,降级静态配置
 
 ### 6.5 优雅启停
@@ -1237,7 +1228,7 @@ Config Center:
 
 - 每个 goroutine(包括 stage workers、Kafka producer flush、config watcher、admin server handler)统一通过 `pkg/safego` 包裹,`panic` 转换为 `gateway_panic_recovered_total` 指标并记录堆栈,**不允许 panic 逃逸导致进程崩溃**
 - HTTP 中间件增加 panic recovery,捕获 handler 内的 panic 返回 500
-- Flink 任务按业务/租户拆分 Job,故障时仅影响对应业务,不级联
+- Flink 任务按业务拆分 Job,故障时仅影响对应业务,不级联
 
 ## 7. 可观测性
 
@@ -1247,8 +1238,8 @@ Config Center:
 
 ```
 # 吞吐
-gateway_samples_total{stage, tenant, status, ingest_city, source_dc}
-gateway_bytes_in_total{tenant, ingest_city, source_dc}
+gateway_samples_total{stage, business, status, ingest_city, source_dc}
+gateway_bytes_in_total{business, ingest_city, source_dc}
 gateway_bytes_out_total{topic, ingest_city}
 
 # 延迟
@@ -1289,7 +1280,7 @@ gateway_ruleset_version{ruleset, ingest_city}
 
 ### 7.3 日志
 
-- 必带 `trace_id, tenant, ingest_city, source_dc, stage`
+- 必带 `trace_id, business, ingest_city, source_dc, stage`
 - 不打印原始 metric/label value
 - 错误打印完整堆栈
 - JSON 格式(Loki/ELK 友好)
@@ -1386,7 +1377,7 @@ github.com/lynnyq/bigdata/
 │   │   ├── bj/                 # 北京规则
 │   │   ├── sz/                 # 深圳规则
 │   │   └── hf/                 # 合肥规则
-│   └── tokens/                 # 多租户 token
+│   └── tokens/                 # 多业务 token
 ├── deploy/
 │   ├── ansible/                # 多机房部署脚本(-e city=bj/sz/hf)
 │   ├── systemd/                # prom-gw@.service template
@@ -1420,7 +1411,7 @@ github.com/lynnyq/bigdata/
 | 跨城专线抖动 / 中断 | 深圳/合肥 Flink 写入北京 StarRocks 失败,DLQ 增长 | 专线冗余(深圳双线、合肥主备);DLQ 落本地 Kafka;专线恢复后批量回放;30 分钟 P1 告警 |
 | 北京 StarRocks 不可写 | 三地 Flink 全部 DLQ,告警升级 | DLQ + 30min P1;本地 ClickHouse 应急查询(提前部署);容量评估 N 天 |
 | 北京机房整体故障 | 三地 Flink 全部 DLQ,数据无法汇聚 | 各城 Flink 切本地 ClickHouse 兜底;北京恢复后批量回灌(Savepoint 位置精确回放) |
-| At-least-once 重复 | 下游数据重复 | Flink 主键去重(`ts + metric + tenant + business + ingest_city + source_dc + labels_hash`,与 StarRocks PK 对齐);StarRocks `PRIMARY KEY` + `REPLACE INTO` 幂等 |
+| At-least-once 重复 | 下游数据重复 | Flink 主键去重(`ts + metric + business + ingest_city + source_dc + labels_hash`,与 StarRocks PK 对齐);StarRocks `PRIMARY KEY` + `REPLACE INTO` 幂等 |
 | 规则热更新误操作 | 大量数据被丢弃/路由错 | 校验 + 不替换失败版本 + 告警 + 回滚;按城市独立 namespace |
 | 单机瓶颈 | 大促写入堆积 | 多实例水平扩展;阶段独立可调优 |
 | Prometheus 版本兼容 | 解码失败 | 严格按官方 proto,矩阵测试(`test/compat/`) |

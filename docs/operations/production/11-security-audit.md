@@ -42,7 +42,7 @@
 
 **[高] 1.2 Admin 接口仅靠 IP 白名单，无独立鉴权**
 - 位置：`internal/admin/server.go:240-262`
-- 描述：Admin 暴露 `PUT /v1/rulesets/{name}`、`POST /v1/rulesets/{name}:reload`、`POST /v1/rulesets/{name}:rollback`、`GET /v1/tenants` 等敏感操作，均无 Token/mTLS/BasicAuth 保护。
+- 描述：Admin 暴露 `PUT /v1/rulesets/{name}`、`POST /v1/rulesets/{name}:reload`、`POST /v1/rulesets/{name}:rollback`、`GET /v1/businesses` 等敏感操作，均无 Token/mTLS/BasicAuth 保护。
 - 修复建议：
   1. 在 `allowlistMW` 后增加 `authMW`，要求 Admin 请求携带独立 admin token
   2. 长期按 `internal/admin/doc.go:2` 注释规划，接入 mTLS + OIDC
@@ -121,7 +121,7 @@
 
 **[高] 8.1 WAL 文件 0o644 含敏感业务数据**
 - 位置：`internal/wal/wal.go:282`、`internal/wal/wal.go:369`
-- 描述：WAL 段文件以 `0o644` 创建。WAL 存储原始 Prometheus WriteRequest（可能含 PII label 如 user_id、email）、tenant 名、traceparent 等，同机任何用户可读。
+- 描述：WAL 段文件以 `0o644` 创建。WAL 存储原始 Prometheus WriteRequest（可能含 PII label 如 user_id、email）、business 名、traceparent 等，同机任何用户可读。
 - 修复建议：文件权限改为 `0o600`，目录 `0o700`，确保 systemd `ReadWritePaths=/data/wal` 且 owner 为 `prom-gw`。
 
 ### 9. kafkasink 不支持 SASL/SSL
@@ -135,7 +135,7 @@
 
 **[高] 10.1 /debug/pprof/* 和 /metrics 完全无鉴权**
 - 位置：`cmd/prom-gw/main.go:463-474`
-- 描述：`:8080` 端口暴露的 `/debug/pprof/*` 可触发 heap/profile 抓取，泄露 goroutine 栈、内存布局；`/metrics` 暴露 `gateway_auth_fail_total{reason}`、`gateway_samples_total{tenant}` 等，泄露 tenant 列表和失败率。
+- 描述：`:8080` 端口暴露的 `/debug/pprof/*` 可触发 heap/profile 抓取，泄露 goroutine 栈、内存布局；`/metrics` 暴露 `gateway_auth_fail_total{reason}`、`gateway_samples_total{business}` 等，泄露 business 列表和失败率。
 - 修复建议：
   1. pprof 端点单独绑 `127.0.0.1:8080`
   2. 或为 `/debug/pprof/*` 加独立 BasicAuth / Token 中间件
@@ -181,7 +181,7 @@
 
 | 编号 | 问题 | 位置 |
 |---|---|---|
-| M-18 | 限流单位为"请求/秒"而非"样本/秒"，与设计不符 | `internal/receiver/tenant_rl.go:77` |
+| M-18 | 限流单位为"请求/秒"而非"样本/秒"，与设计不符 | `internal/receiver/business_rl.go:77` |
 | M-19 | WAL fsync 持锁串行化，吞吐瓶颈 200-1000 写/秒 | `internal/wal/wal.go:453-483` |
 | M-20 | readSegment 缺 totalLen 上界，损坏文件可触发 4GB 内存分配 | `internal/wal/wal.go:702-706` |
 | M-21 | gogo/protobuf 已废弃，无上游修复 | `go.mod:7` |
@@ -199,7 +199,7 @@
 | L-1 | 鉴权失败响应泄露 reason 分类 | `internal/receiver/server.go:197` |
 | L-2 | Bearer 前缀匹配区分大小写 | `internal/receiver/server.go:359-365` |
 | L-3 | 路由无显式鉴权白名单 | `internal/receiver/server.go:123-127` |
-| L-4 | /v1/tenants 暴露 tenant 元数据 | `internal/admin/server.go:84-90` |
+| L-4 | /v1/businesses 暴露 business 元数据 | `internal/admin/server.go:84-90` |
 | L-5 | Token 强度不足（无随机熵） | `configs/tokens/local.yaml:5,11` |
 | L-6 | computeMD5 命名误导（非加密哈希） | `internal/config/source.go:504-511` |
 | L-7 | 默认 Token 路径指向开发文件 | `cmd/prom-gw/main.go:59` |
@@ -228,8 +228,8 @@
 - **原子规则热更新**：`atomic.Pointer[CompiledRuleSet]` 无锁切换，批次内一致
 - **Panic recovery 覆盖完整**：safego 封装所有后台 goroutine，HTTP 中间件 + stage 级 recover
 - **WAL 双阈值有界**：50GB + 80% 磁盘使用率，retention 24h 自动清理
-- **TenantInfo 显式排除 token 字段**：`internal/admin/server.go:84-90`
-- **限流 key 不可伪造**：tenant 由服务端 token 鉴权决定，不读取 HTTP header
+- **BusinessInfo 显式排除 token 字段**：`internal/admin/server.go:84-90`
+- **限流 key 不可伪造**：business 由服务端 token 鉴权决定，不读取 HTTP header
 - **Kafka producer 队列有界**：65535 + 100ms BlockTimeout
 - **Graceful shutdown**：SIGINT/SIGTERM 触发，30s 超时，defer 链有序关闭
 

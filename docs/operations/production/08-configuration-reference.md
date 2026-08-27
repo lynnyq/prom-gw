@@ -52,7 +52,7 @@
 - **类型**:string(文件路径)
 - **默认**:`configs/tokens/local.yaml`
 - **环境变量覆盖**:`PROM_GW_TOKENS`
-- **说明**:token 鉴权配置,定义 token → tenant 映射、默认 topic、限流。支持 SIGHUP 热重载。
+- **说明**:token 鉴权配置,定义 token → business 映射、默认 topic、限流。支持 SIGHUP 热重载。
 - **示例**:
   ```bash
   --tokens=configs/tokens/production.yaml
@@ -94,7 +94,7 @@
 
 - **类型**:string(`host:port`)
 - **默认**:`:8082`
-- **说明**:Admin API 监听地址,提供 ruleset 热更新、stats、tenants 等查询。
+- **说明**:Admin API 监听地址,提供 ruleset 热更新、stats、businesses 等查询。
 - **安全**:**必须**通过 `--admin-allow-cidr` 限制来源 IP,默认仅本机
 - **示例**:
   ```bash
@@ -330,7 +330,7 @@ global:
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
 | `name` | string | ✓ | — | ruleset 唯一名,用于 Admin API 路径 |
-| `tenant` | string | 否 | `""` | 适用租户(多租户预留,v1 全局生效) |
+| `business` | string | 否 | `""` | 适用business(多business预留,v1 全局生效) |
 | `default_topic` | string | ✓ | — | 没路由命中时的兜底 topic |
 | `match` | object | 否 | `{}`(全量) | metric 命中条件 |
 | `stages` | array | 否 | `[]`(透传) | 处理阶段列表 |
@@ -517,8 +517,8 @@ match:
 ```yaml
 tokens:
   "<token-string>":
-    tenant: ...
-    tenant_id: ...
+    business: ...
+    business_id: ...
     default_topic: ...
     rate_limit: ...
 ```
@@ -528,30 +528,30 @@ tokens:
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `tokens` | map | ✓ | token → 配置的映射。key 是 token 字符串 |
-| `tokens[].tenant` | string | ✓ | 租户名,写入 Kafka header `tenant` |
-| `tokens[].tenant_id` | string | 否 | IAM 主键(预留,本地可空) |
+| `tokens[].business` | string | ✓ | business 名,写入 Kafka header `business` |
+| `tokens[].business_id` | string | 否 | IAM 主键(预留,本地可空) |
 | `tokens[].default_topic` | string | ✓ | 默认 topic(route 未命中时兜底) |
-| `tokens[].rate_limit` | int | 否 | 该 tenant 的 samples/s 上限。0 = 不限 |
+| `tokens[].rate_limit` | int | 否 | 该 business 的 samples/s 上限。0 = 不限 |
 
 ### 4.3 完整示例
 
 ```yaml
 tokens:
   "tk_app_business_dev":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.local.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.local.routed.infra
     rate_limit: 50000
 
   "tk_prod_bj_payment":
-    tenant: payment
-    tenant_id: "2001"
+    business: payment
+    business_id: "2001"
     default_topic: prom.bj.routed.payment
     rate_limit: 200000
 ```
@@ -566,7 +566,7 @@ kill -HUP $(pgrep -f "prom-gw")
 日志确认:
 ```
 tokens reloaded count=3
-tenant rate limits reloaded tenants=3
+business rate limits reloaded businesses=3
 ```
 
 ---
@@ -653,7 +653,7 @@ tenant rate limits reloaded tenants=3
 ```yaml
 rulesets:
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.local.routed.app_business
     version: 1
     match:
@@ -685,8 +685,8 @@ global:
 ```yaml
 tokens:
   "tk_app_business_dev":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.local.routed.app_business
     rate_limit: 80000
 ```
@@ -716,7 +716,7 @@ KAFKA_BROKERS=localhost:9092 \
 rulesets:
   # 1. app-business 业务指标
   - name: app-business-bj
-    tenant: app-business
+    business: app-business
     default_topic: prom.bj.routed.app_business
     version: 7
     match:
@@ -751,7 +751,7 @@ rulesets:
 
   # 2. infra 基础设施指标(高保留)
   - name: infra-bj
-    tenant: infra
+    business: infra
     default_topic: prom.bj.routed.infra
     version: 3
     match:
@@ -769,7 +769,7 @@ rulesets:
 
   # 3. 长期趋势指标(降采样)
   - name: longterm-bj
-    tenant: app-business
+    business: app-business
     default_topic: prom.bj.agg5m.app_business
     version: 2
     match:
@@ -794,20 +794,20 @@ global:
 ```yaml
 tokens:
   "tk_prod_bj_app_business_<secret>":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.bj.routed.app_business
     rate_limit: 200000
 
   "tk_prod_bj_infra_<secret>":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.bj.routed.infra
     rate_limit: 150000
 
   "tk_prod_bj_payment_<secret>":
-    tenant: payment
-    tenant_id: "2001"
+    business: payment
+    business_id: "2001"
     default_topic: prom.bj.routed.payment
     rate_limit: 100000
 ```
@@ -868,7 +868,7 @@ global:
 | **省存储(降采样)** | `downsample.interval` / `aggregations` | `5m` / `[avg, p99]` |
 | **WAL 容量紧张** | `--wal-max-bytes` / `--wal-disk-used-ratio` | `20GB` / `0.70` |
 | **Kafka 慢导致积压** | KafkaSink `Linger` / `BatchMaxBytes` | `100ms` / `2MB` |
-| **多租户隔离** | `tokens[].rate_limit` | 按 tenant 配额分配 |
+| **多business隔离** | `tokens[].rate_limit` | 按 business 配额分配 |
 | **跨城专线带宽紧张** | Flink 端 5min 聚合 → 1h 跨城(见 flink-consumer-guide.md) | — |
 
 ### 7.2 端口速查
@@ -885,7 +885,7 @@ global:
 | 信号 | 行为 |
 |---|---|
 | `SIGINT` / `SIGTERM` | 优雅停机(30s 超时) |
-| `SIGHUP` | 热重载 token + tenant 限流配置 |
+| `SIGHUP` | 热重载 token + business 限流配置 |
 
 ### 7.4 退出码
 

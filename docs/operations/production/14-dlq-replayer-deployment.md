@@ -44,7 +44,7 @@ DLQ topic 中的消息为 JSON 格式的 `DlqMessage`:
 
 ```json
 {
-  "original": "{\"ts\":\"2026-08-25 10:50:00\",\"metric\":\"app_cpu_usage\",\"tenant\":\"tenant-a\",\"business\":\"order-service\",\"ingest_city\":\"bj\",\"source_dc\":\"beijing-dongba\",\"labels_hash\":\"a1b2c3d4\",\"labels\":{\"host\":\"host-1\"},\"sample_count\":300,\"value_sum\":15432.5,\"value_max\":98.7,\"value_min\":12.3,\"value_avg\":51.44,\"ingest_time\":\"2026-08-25 10:55:02\"}",
+  "original": "{\"ts\":\"2026-08-25 10:50:00\",\"metric\":\"app_cpu_usage\",\"business\":\"order-service\",\"ingest_city\":\"bj\",\"source_dc\":\"beijing-dongba\",\"labels_hash\":\"a1b2c3d4\",\"labels\":{\"host\":\"host-1\"},\"sample_count\":300,\"value_sum\":15432.5,\"value_max\":98.7,\"value_min\":12.3,\"value_avg\":51.44,\"ingest_time\":\"2026-08-25 10:55:02\"}",
   "label": "bj_5m_20260825_1050_app-business_0dcdef41",
   "error": "Connection refused: getsockopt",
   "retryCount": 0,
@@ -93,7 +93,7 @@ curl -s http://<starrocks-fe-vip>:8030/api/health
 
 # 5. 确认目标表存在
 mysql -h <starrocks-fe-vip> -P 9030 -u root -e \
-  "SHOW CREATE TABLE prom.sr_bj_metrics_5m"
+  "SHOW CREATE TABLE prom.metrics_5m"
 ```
 
 ### 2.3 创建目录
@@ -151,7 +151,7 @@ kafka.session.timeout.ms=30000
 starrocks.fe.host=<beijing-fe-vip>
 starrocks.fe.port=8030
 starrocks.db=prom
-starrocks.table=sr_bj_metrics_5m
+starrocks.table=metrics_5m
 starrocks.user=root
 starrocks.password=
 starrocks.gzip=true
@@ -310,7 +310,7 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-bj
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
 DLQ_SR_DB=prom
-DLQ_SR_TABLE=sr_bj_metrics_5m
+DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
 
@@ -355,7 +355,7 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-sz
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
 DLQ_SR_DB=prom
-DLQ_SR_TABLE=sr_bj_metrics_5m
+DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
 
@@ -400,7 +400,7 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-hf
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
 DLQ_SR_DB=prom
-DLQ_SR_TABLE=sr_bj_metrics_5m
+DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
 
@@ -488,7 +488,7 @@ journalctl -u dlq-replayer@bj -f
 │    5. 若 buffer 满(100 条)或超时(5s)→ 触发 Stream Load       │
 │    6. Stream Load:                                               │
 │       - 构建 batch JSON: [original1, original2, ...]            │
-│       - HTTP PUT → FE:8030/api/prom/sr_bj_metrics_5m/_stream_load│
+│       - HTTP PUT → FE:8030/api/prom/metrics_5m/_stream_load│
 │       - Label: dlq_replay_<原label>  (复用原 label 保证幂等)    │
 │       - 失败 → 指数退避重试(10s/30s/60s/120s/300s)              │
 │    7. 成功 → consumer.commitSync()  (提交 offset)               │

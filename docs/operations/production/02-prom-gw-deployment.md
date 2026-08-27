@@ -47,7 +47,7 @@ Prometheus
 │ Kafka: prom.<city>.routed.<category>           │
 │   payload = 原始 snappy+protobuf body          │
 │   key = series hash (同 series 落同分区)       │
-│   headers = {tenant, source_dc, ingest_city}   │
+│   headers = {business, source_dc, ingest_city}   │
 └─────────────────────────────────────────────────┘
   │
   │ Flink KafkaSource 消费
@@ -68,7 +68,7 @@ tokens.yaml                    rules.yaml (ruleset)
 ─────────────                  ─────────────────────────────
 tokens:                        rulesets:
   "tk_app_business_prod":         - name: app-business
-    default_topic:                  tenant: app-business
+    default_topic:                  business: app-business
       prom.bj.routed.app_business   default_topic: prom.bj.routed.app_business
     rate_limit: 80000               stages:
                                       - relabel ...
@@ -113,17 +113,17 @@ tokens:                        rulesets:
 #   tk_infra_prod       → prom.bj.routed.infra
 # ============================================================
 tokens:
-  # app-business 租户:业务应用指标(CPU/内存/QPS/RT 等)
+  # app-business business:业务应用指标(CPU/内存/QPS/RT 等)
   "tk_app_business_prod":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.bj.routed.app_business    # 写入的 topic
     rate_limit: 80000                             # samples/s 上限
 
-  # infra 租户:基础设施指标(主机/网络/存储 等)
+  # infra business:基础设施指标(主机/网络/存储 等)
   "tk_infra_prod":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.bj.routed.infra           # 写入的 topic
     rate_limit: 50000
 ```
@@ -132,10 +132,10 @@ tokens:
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `tenant` | string | 租户名,用于 Kafka key 和日志标识 |
-| `tenant_id` | string | 租户 ID(预留 IAM 主键,v1 可不填) |
+| `business` | string | business 名,用于 Kafka key 和日志标识 |
+| `business_id` | string | business ID(预留 IAM 主键,v1 可不填) |
 | `default_topic` | string | 写入的 topic(ruleset 配置后被覆盖) |
-| `rate_limit` | int | 该 tenant 的 samples/s 上限,超过则 429 |
+| `rate_limit` | int | 该 business 的 samples/s 上限,超过则 429 |
 
 **多城 token 配置**:每城 prom-gw 实例独立部署,token 配置中 `default_topic` 带城市前缀:
 
@@ -167,14 +167,14 @@ tokens:
 # 热加载: fsnotify 监听文件变化,自动编译+原子切换
 #
 # 路由规则:
-#   app-business 租户 → relabel → route → prom.bj.routed.{core,infra,data,app_business}
-#   infra 租户        → relabel          → prom.bj.routed.infra
+#   app-business business → relabel → route → prom.bj.routed.{core,infra,data,app_business}
+#   infra business        → relabel          → prom.bj.routed.infra
 # ============================================================
 rulesets:
-  # ── app-business 租户规则集 ──
+  # ── app-business business规则集 ──
   # 收到 remote_write 后同步处理:relabel + route,直接写入 routed topic
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.bj.routed.app_business   # 路由未命中时的兜底 topic
     version: 1
     match:
@@ -202,10 +202,10 @@ rulesets:
       - type: sample
         rate: 0.1                                # 保留 10%
 
-  # ── infra 租户规则集 ──
+  # ── infra business规则集 ──
   # 基础设施指标通常不按 team 分桶,直接写入 routed.infra
   - name: infra
-    tenant: infra
+    business: infra
     default_topic: prom.bj.routed.infra           # 写入的 topic
     version: 1
     match:
@@ -231,7 +231,7 @@ global:
 
 **关键约束**:
 - `default_topic` 和 `route.rules[].topic` 决定数据实际写入哪些 topic
-- 一个 ruleset 处理一个 tenant 的数据
+- 一个 ruleset 处理一个 business 的数据
 - `input_topic` 字段已废弃,仅作文档标识,运行期不参与逻辑
 
 ### 5.5 systemd template 部署

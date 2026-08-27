@@ -671,56 +671,349 @@ SET PASSWORD FOR 'root' = PASSWORD('YourStrongPassword123');
 
 ```sql
 -- 创建 prom-gw 分析库
-CREATE DATABASE prom_gw_analytics;
+CREATE DATABASE observability;
 
 -- 创建专用用户
 CREATE USER 'prom_gw' IDENTIFIED BY 'PromGwPassword123';
 
 -- 授权
-GRANT SELECT, INSERT, UPDATE, DELETE ON prom_gw_analytics.* TO 'prom_gw';
+GRANT SELECT, INSERT, UPDATE, DELETE ON observability.* TO 'prom_gw';
 
 -- 刷新权限
 FLUSH PRIVILEGES;
 
 -- 验证
 SHOW DATABASES;
--- 期望: information_schema / prom_gw_analytics
+-- 期望: information_schema / observability
 ```
 
-### 6.4 建表示例
+### 6.4 prom-gw 指标表 DDL(三独立表)
+
+完整 SQL 脚本见 `deploy/starrocks/init_tables.sql`,生产部署执行:
+
+```bash
+mysql -h sr-fe-1 -P9030 -uprom_gw -p'PromGwPassword123' < deploy/starrocks/init_tables.sql
+```
+
+#### 6.4.1 表设计概览
+
+| 表名 | 粒度 | 写入方 | 保留 | BUCKETS | 说明 |
+|---|---|---|---|---|---|
+| `metrics_5m` | 5 分钟 | Flink Stream Load | 7 天 | 32 | 唯一实时写入点 |
+| `metrics_1h` | 1 小时 | 周期任务(5m 级联) | 90 天 | 16 | 由 agg_5m_to_1h 生成 |
+| `metrics_1d` | 1 天 | 周期任务(1h 级联) | 3 年 | 8 | 由 agg_1h_to_1d 生成 |
+
+#### 6.4.2 5 分钟明细表(实时写入)
 
 ```sql
-USE prom_gw_analytics;
-
--- 创建分区表示例(Kafka 消费指标分析)
-CREATE TABLE IF NOT EXISTS kafka_consumer_metrics (
-    dt          DATE         NOT NULL COMMENT '日期',
-    cluster     VARCHAR(64)  NOT NULL COMMENT 'Kafka集群',
-    topic       VARCHAR(256) NOT NULL COMMENT 'Topic',
-    consumer_group VARCHAR(128) NOT NULL COMMENT '消费组',
-    partition   INT          NOT NULL COMMENT '分区',
-    offset      BIGINT       NOT NULL COMMENT '当前offset',
-    lag         BIGINT       NOT NULL COMMENT '积压量',
-    create_time DATETIME     NOT NULL COMMENT '采集时间'
-)
-ENGINE = OLAP
-DUPLICATE KEY (dt, cluster, topic)
-PARTITION BY RANGE (dt) (
-    PARTITION p20260820 VALUES **('2026-08-20'), ('2026-08-21')),
-    PARTITION p20260821 VALUES [('2026-08-21'), ('2026-08-22'))
-)
-DISTRIBUTED BY HASH(cluster, topic) BUCKETS 10
-PROPERTIES (
-    "replication_num" = "3",
-    "storage_medium" = "hdd"
-);
-
--- 验证表创建
-SHOW TABLES;
-DESCRIBE kafka_consumer_metrics;
+CREATE TABLE IF NOT EXISTS metrics_5m (
+  ts            DATETIME     NOT NULL COMMENT '5 min 窗口起始时间',
+  metric        VARCHAR(128) NOT NULL COMMENT '指标名',
+  business      VARCHAR(64)  NOT NULL COMMENT '业务标识(来自 token)',
+  ingest_city   VARCHAR(16)  NOT NULL COMMENT '采集城市:bj/sz/hf',
+  source_dc     VARCHAR(32)  NOT NULL COMMENT '源数据中心',
+  labels_hash   VARCHAR(64)  NOT NULL COMMENT 'labels 的 SHA-1 hash,作 PK 键列',
+  labels        MAP<VARCHAR(64), VARCHAR(256)> COMMENT '原始 labels(仅查询)',
+  sample_count  BIGINT       NOT NULL COMMENT '窗口样本数',
+  value_sum     DOUBLE       NOT NULL COMMENT '窗口求和',
+  value_max     DOUBLE                COMMENT '窗口最大值',
+  value_min     DOUBLE                COMMENT '窗口最小值',
+  value_avg     DOUBLE                COMMENT '窗口均值',
+  value_p50     DOUBLE                COMMENT '窗口 p50',
+  value_p99     DOUBLE                COMMENT '窗口 p99'
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 32
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-7",
+    "dynamic_partition.end" = "3",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "32",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
 ```
 
-### 6.5 集群健康检查
+#### 6.4.3 1 小时聚合表(级联生成)
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_1h (
+  ts            DATETIME     NOT NULL,
+  metric        VARCHAR(128) NOT NULL,
+  business      VARCHAR(64)  NOT NULL,
+  ingest_city   VARCHAR(16)  NOT NULL,
+  source_dc     VARCHAR(32)  NOT NULL,
+  labels_hash   VARCHAR(64)  NOT NULL,
+  labels        MAP<VARCHAR(64), VARCHAR(256)>,
+  sample_count  BIGINT       NOT NULL COMMENT '1h = 12 个 5min 样本',
+  value_sum     DOUBLE       NOT NULL,
+  value_max     DOUBLE,
+  value_min     DOUBLE,
+  value_avg     DOUBLE,
+  value_p50     DOUBLE       COMMENT 'percentile_approx t-digest 合并',
+  value_p99     DOUBLE
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 16
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-90",
+    "dynamic_partition.end" = "3",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "16",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
+```
+
+#### 6.4.4 1 天聚合表(级联生成)
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_1d (
+  ts            DATETIME     NOT NULL,
+  metric        VARCHAR(128) NOT NULL,
+  business      VARCHAR(64)  NOT NULL,
+  ingest_city   VARCHAR(16)  NOT NULL,
+  source_dc     VARCHAR(32)  NOT NULL,
+  labels_hash   VARCHAR(64)  NOT NULL,
+  labels        MAP<VARCHAR(64), VARCHAR(256)>,
+  sample_count  BIGINT       NOT NULL COMMENT '1d = 24 个 1h 样本',
+  value_sum     DOUBLE       NOT NULL,
+  value_max     DOUBLE,
+  value_min     DOUBLE,
+  value_avg     DOUBLE,
+  value_p50     DOUBLE,
+  value_p99     DOUBLE
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 8
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "MONTH",
+    "dynamic_partition.start" = "-36",
+    "dynamic_partition.end" = "2",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "8",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
+```
+
+#### 6.4.5 三表设计要点
+
+- **PRIMARY KEY 模型**:三表均使用 PK 模型,`REPLACE INTO` 自动去重,保证 Flink at-least-once 和周期任务幂等
+- **labels_hash**:Flink 端用 SHA-1 计算 labels 稳定 hash,作为 PK 键列(StarRocks PK 键列不支持 MAP 类型)
+- **级联而非跳级**:1d 从 1h 聚合(非从 5m 直跳),扫描量最小(1h 表 ~66 GB/天 vs 5m 表 ~1 TB/天)
+- **INSERT OVERWRITE**:周期任务用 `INSERT OVERWRITE` 覆盖目标时间窗口,重跑无重复
+- **p50/p99 聚合**:用 `percentile_approx` t-digest 跨窗口合并,为近似分位(非精确),仅作趋势参考
+- **BUCKETS 递减**:5m 表 32 桶(高并发写)、1h 表 16 桶、1d 表 8 桶(减少 tablet 开销)
+- **独立 TTL**:各表 `dynamic_partition` 独立清理,互不影响
+
+### 6.5 级联聚合 SQL(5m → 1h → 1d)
+
+三表数据并非 Flink 一次性产出。Flink 只实时写入 5m 表,1h 和 1d 表通过周期 SQL 任务从下级表级联聚合而成。
+
+#### 6.5.1 5m → 1h 聚合(每小时执行)
+
+```sql
+-- 每小时整点执行,聚合上一个小时的 5m 数据到 1h 表
+-- INSERT OVERWRITE 保证幂等:重跑覆盖,不产生重复
+INSERT OVERWRITE metrics_1h
+SELECT
+    date_trunc('hour', ts)                                             AS ts,
+    metric,
+    business,
+    ingest_city,
+    source_dc,
+    labels_hash,
+    labels,
+    SUM(sample_count)                                                  AS sample_count,
+    SUM(value_sum)                                                     AS value_sum,
+    MAX(value_max)                                                     AS value_max,
+    MIN(value_min)                                                     AS value_min,
+    SUM(value_sum) / SUM(sample_count)                                 AS value_avg,
+    percentile_approx(value_p50, 0.5)                                   AS value_p50,
+    percentile_approx(value_p99, 0.99)                                  AS value_p99
+FROM metrics_5m
+WHERE ts >= date_trunc('hour', NOW()) - INTERVAL 1 HOUR
+  AND ts <  date_trunc('hour', NOW())
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
+```
+
+**聚合逻辑说明**:
+- 5m 表 12 行 → 1h 表 1 行(每小时 12 个 5 min 窗口)
+- `sample_count`:求和(Σsample_count)
+- `value_sum`:求和(Σvalue_sum)
+- `value_max`:取 MAX(跨窗口最大值)
+- `value_min`:取 MIN(跨窗口最小值)
+- `value_avg`:Σvalue_sum / Σsample_count(加权平均)
+- `value_p50` / `value_p99`:`percentile_approx` t-digest 近似合并
+
+#### 6.5.2 1h → 1d 聚合(每天执行)
+
+```sql
+-- 每天 0 点执行,聚合前一天的 1h 数据到 1d 表
+INSERT OVERWRITE metrics_1d
+SELECT
+    date_trunc('day', ts)                                              AS ts,
+    metric,
+    business,
+    ingest_city,
+    source_dc,
+    labels_hash,
+    labels,
+    SUM(sample_count)                                                  AS sample_count,
+    SUM(value_sum)                                                     AS value_sum,
+    MAX(value_max)                                                     AS value_max,
+    MIN(value_min)                                                     AS value_min,
+    SUM(value_sum) / SUM(sample_count)                                 AS value_avg,
+    percentile_approx(value_p50, 0.5)                                   AS value_p50,
+    percentile_approx(value_p99, 0.99)                                  AS value_p99
+FROM metrics_1h
+WHERE ts >= date_trunc('day', NOW()) - INTERVAL 1 DAY
+  AND ts <  date_trunc('day', NOW())
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
+```
+
+**聚合逻辑说明**:
+- 1h 表 24 行 → 1d 表 1 行(每天 24 个 1 小时窗口)
+- 聚合函数与 5m → 1h 完全一致
+- 级联优势:1h 表扫描量(~66 GB/天)远小于 5m 表(~1 TB/天)
+
+#### 6.5.3 手动补跑(历史数据)
+
+```sql
+-- 补跑指定小时的 5m → 1h(替换时间为目标小时)
+-- INSERT OVERWRITE metrics_1h
+-- SELECT ... (同上)
+-- FROM metrics_5m
+-- WHERE ts >= '2026-08-27 00:00:00' AND ts < '2026-08-27 01:00:00'
+-- GROUP BY 1, 2, 3, 4, 5, 6, 7;
+
+-- 补跑指定天的 1h → 1d(替换日期为目标天)
+-- INSERT OVERWRITE metrics_1d
+-- SELECT ... (同上)
+-- FROM metrics_1h
+-- WHERE ts >= '2026-08-26 00:00:00' AND ts < '2026-08-27 00:00:00'
+-- GROUP BY 1, 2, 3, 4, 5, 6, 7;
+
+-- 首次全量初始化:从 5m 表最近 7 天聚合出 1h 数据
+-- INSERT OVERWRITE metrics_1h
+-- SELECT date_trunc('hour', ts) AS ts, metric, business, ingest_city, source_dc,
+--        labels_hash, labels, SUM(sample_count) AS sample_count,
+--        SUM(value_sum) AS value_sum, MAX(value_max) AS value_max,
+--        MIN(value_min) AS value_min,
+--        SUM(value_sum) / SUM(sample_count) AS value_avg,
+--        percentile_approx(value_p50, 0.5) AS value_p50,
+--        percentile_approx(value_p99, 0.99) AS value_p99
+-- FROM metrics_5m
+-- WHERE ts >= date_trunc('day', NOW()) - INTERVAL 7 DAY
+-- GROUP BY 1, 2, 3, 4, 5, 6, 7;
+```
+
+### 6.6 定时任务调度
+
+#### 方案 A:StarRocks 内置 CREATE JOB(推荐)
+
+StarRocks 2.5+ 支持内置定时任务,无需外部调度系统:
+
+```sql
+-- 5m → 1h:每小时整点执行
+CREATE JOB IF NOT EXISTS agg_5m_to_1h
+ON SCHEDULE EVERY 1 HOUR STARTS (date_trunc('hour', NOW()) + INTERVAL 1 HOUR)
+DO
+  INSERT OVERWRITE metrics_1h
+  SELECT
+      date_trunc('hour', ts) AS ts,
+      metric, business, ingest_city, source_dc, labels_hash, labels,
+      SUM(sample_count) AS sample_count,
+      SUM(value_sum) AS value_sum,
+      MAX(value_max) AS value_max,
+      MIN(value_min) AS value_min,
+      SUM(value_sum) / SUM(sample_count) AS value_avg,
+      percentile_approx(value_p50, 0.5) AS value_p50,
+      percentile_approx(value_p99, 0.99) AS value_p99
+  FROM metrics_5m
+  WHERE ts >= date_trunc('hour', NOW()) - INTERVAL 1 HOUR
+    AND ts <  date_trunc('hour', NOW())
+  GROUP BY 1, 2, 3, 4, 5, 6, 7;
+
+-- 1h → 1d:每天 0 点执行
+CREATE JOB IF NOT EXISTS agg_1h_to_1d
+ON SCHEDULE EVERY 1 DAY STARTS (date_trunc('day', NOW()) + INTERVAL 1 DAY)
+DO
+  INSERT OVERWRITE metrics_1d
+  SELECT
+      date_trunc('day', ts) AS ts,
+      metric, business, ingest_city, source_dc, labels_hash, labels,
+      SUM(sample_count) AS sample_count,
+      SUM(value_sum) AS value_sum,
+      MAX(value_max) AS value_max,
+      MIN(value_min) AS value_min,
+      SUM(value_sum) / SUM(sample_count) AS value_avg,
+      percentile_approx(value_p50, 0.5) AS value_p50,
+      percentile_approx(value_p99, 0.99) AS value_p99
+  FROM metrics_1h
+  WHERE ts >= date_trunc('day', NOW()) - INTERVAL 1 DAY
+    AND ts <  date_trunc('day', NOW())
+  GROUP BY 1, 2, 3, 4, 5, 6, 7;
+```
+
+**管理命令**:
+
+```sql
+-- 查看所有 JOB
+SHOW JOBS;
+
+-- 查看运行中 JOB
+SHOW RUNNING JOBS;
+
+-- 查看 JOB 执行历史
+SHOW HISTORY FOR JOB agg_5m_to_1h;
+SHOW HISTORY FOR JOB agg_1h_to_1d;
+
+-- 暂停 JOB
+STOP JOB agg_5m_to_1h;
+STOP JOB agg_1h_to_1d;
+
+-- 恢复 JOB
+RESUME JOB agg_5m_to_1h;
+RESUME JOB agg_1h_to_1d;
+
+-- 删除 JOB
+DROP JOB agg_5m_to_1h;
+DROP JOB agg_1h_to_1d;
+```
+
+#### 方案 B:外部 crontab 调度
+
+若 StarRocks 版本 < 2.5 或需要接入企业调度平台,用 crontab 调用:
+
+```bash
+# /etc/cron.d/starrocks-agg
+# 5m → 1h:每小时第 1 分钟执行(延迟 1 分钟确保 5m 数据已落盘)
+* 1 * * * bdops mysql -h sr-fe-1 -P9030 -uprom_gw -p'PromGwPassword123' observability \
+  -e "INSERT OVERWRITE metrics_1h SELECT date_trunc('hour', ts) AS ts, metric, business, ingest_city, source_dc, labels_hash, labels, SUM(sample_count) AS sample_count, SUM(value_sum) AS value_sum, MAX(value_max) AS value_max, MIN(value_min) AS value_min, SUM(value_sum) / SUM(sample_count) AS value_avg, percentile_approx(value_p50, 0.5) AS value_p50, percentile_approx(value_p99, 0.99) AS value_p99 FROM metrics_5m WHERE ts >= date_trunc('hour', NOW()) - INTERVAL 1 HOUR AND ts < date_trunc('hour', NOW()) GROUP BY 1, 2, 3, 4, 5, 6, 7;" \
+  >> /applog/starrocks/agg_5m_to_1h.log 2>&1
+
+# 1h → 1d:每天 00:10 执行(延迟 10 分钟确保 1h 聚合已完成)
+10 0 * * * bdops mysql -h sr-fe-1 -P9030 -uprom_gw -p'PromGwPassword123' observability \
+  -e "INSERT OVERWRITE metrics_1d SELECT date_trunc('day', ts) AS ts, metric, business, ingest_city, source_dc, labels_hash, labels, SUM(sample_count) AS sample_count, SUM(value_sum) AS value_sum, MAX(value_max) AS value_max, MIN(value_min) AS value_min, SUM(value_sum) / SUM(sample_count) AS value_avg, percentile_approx(value_p50, 0.5) AS value_p50, percentile_approx(value_p99, 0.99) AS value_p99 FROM metrics_1h WHERE ts >= date_trunc('day', NOW()) - INTERVAL 1 DAY AND ts < date_trunc('day', NOW()) GROUP BY 1, 2, 3, 4, 5, 6, 7;" \
+  >> /applog/starrocks/agg_1h_to_1d.log 2>&1
+```
+
+> **注意**:crontab 方案需自行处理失败重试和告警,建议配套 Prometheus + Alertmanager 监控 JOB 执行状态。
+
+### 6.7 集群健康检查
 
 ```sql
 -- 查看 FE 状态
@@ -737,7 +1030,7 @@ SHOW FRONTENDS;
 SHOW DATABASES;
 
 -- 查看 Tablet 分布(建表后)
-SHOW TABLET FROM prom_gw_analytics.kafka_consumer_metrics LIMIT 10;
+SHOW TABLET FROM observability.kafka_consumer_metrics LIMIT 10;
 ```
 
 ---
@@ -961,7 +1254,7 @@ ALTER SYSTEM ADD BACKEND "sr-be-4:9050";
 SHOW PROC '/backends'\G
 
 -- 触发负载均衡(可选)
--- ADMIN SHOW REPLICA DISTRIBUTION FROM TABLE prom_gw_analytics.kafka_consumer_metrics;
+-- ADMIN SHOW REPLICA DISTRIBUTION FROM TABLE observability.kafka_consumer_metrics;
 ```
 
 > **扩容后自动均衡**:BE 加入集群后,StarRocks 自动迁移部分 Tablet 到新节点,实现负载均衡。可通过 `SHOW PROC '/backends'` 的 `TabletNum` 观察均衡进度。

@@ -123,7 +123,7 @@ rulesets:
   并记 `gateway_errors_total{type="enrich_template_missing"}`
 - 静态值:直接作为 label value
 
-> 暂不支持 `${tenant}` / `${source_dc}` 引用;如需机房/租户标识,请在
+> 暂不支持 `${business}` / `${source_dc}` 引用;如需机房/business 标识,请在
 > Prometheus 端用 `external_labels` 注入,prom-gw 会随 `WriteRequest` 一并透传,
 > 经 `relabel.keep_labels` 保留即可。
 
@@ -224,7 +224,7 @@ rulesets:
         config:
           labels:
             gateway_dc: "${source_dc}"
-            gateway_tenant: "${tenant}"
+            gateway_business: "${business}"
 
       # 5. downsample 1 分钟桶
       - type: downsample

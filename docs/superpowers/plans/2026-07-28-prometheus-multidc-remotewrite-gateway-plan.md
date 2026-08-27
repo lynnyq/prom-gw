@@ -156,7 +156,7 @@ kill %1                       # 收到 SIGTERM 干净退出
   - `internal/parser/sample.go`:
     ```go
     type Sample struct {
-        Tenant    string            // 来源租户(intern 池复用,见 pkg/stringpool)
+        Business    string            // 来源business(intern 池复用,见 pkg/stringpool)
         SourceDC  string            // 来自哪个机房(intern 池复用)
         Metric    string            // metric name
         Labels    []Label           // 排序后的 label 集合
@@ -170,7 +170,7 @@ kill %1                       # 收到 SIGTERM 干净退出
         //   写入 Kafka 时再从 ctx 取出,放进 message header `traceparent`。
     }
     type Label struct { Name, Value string }
-    func (s Sample) SeriesKey() string // hash(tenant+metric+sortedLabels) 用于分区
+    func (s Sample) SeriesKey() string // hash(business+metric+sortedLabels) 用于分区
     ```
   - 性能约束:`Sample` 整体大小 ≤ 256 字节;`Labels` 容量 4 起,超过时复用底层数组
 
@@ -180,17 +180,17 @@ kill %1                       # 收到 SIGTERM 干净退出
     ```go
     package auth
     type Authenticator interface {
-        Verify(ctx context.Context, token string) (Tenant, error)
+        Verify(ctx context.Context, token string) (Business, error)
     }
-    type Tenant struct {
-        Name, DefaultTopic, TenantID string
+    type Business struct {
+        Name, DefaultTopic, BusinessID string
         RateLimit int
     }
     ```
   - `internal/config/token.go`(实现 `LocalTokenAuthenticator`):
     ```go
-    type LocalTokenAuthenticator struct { tokens map[string]auth.Tenant }
-    func (a *LocalTokenAuthenticator) Verify(ctx context.Context, token string) (auth.Tenant, error)
+    type LocalTokenAuthenticator struct { tokens map[string]auth.Business }
+    func (a *LocalTokenAuthenticator) Verify(ctx context.Context, token string) (auth.Business, error)
     func NewLocalTokenAuthenticator(path string) (*LocalTokenAuthenticator, error)
     func (a *LocalTokenAuthenticator) Reload(path string) error  // SIGHUP 调用
     ```
@@ -200,13 +200,13 @@ kill %1                       # 收到 SIGTERM 干净退出
     ```yaml
     tokens:
       "tk_app_business_xxx":
-        tenant: app-business
-        tenant_id: 1001            # 未来 IAM 主键,v1 可空
+        business: app-business
+        business_id: 1001            # 未来 IAM 主键,v1 可空
         default_topic: prom.raw.app_business
         rate_limit: 80000
       "tk_infra_xxx":
-        tenant: infra
-        tenant_id: 1002
+        business: infra
+        business_id: 1002
         default_topic: prom.raw.infra
         rate_limit: 50000
     ```
@@ -225,7 +225,7 @@ kill %1                       # 收到 SIGTERM 干净退出
       | `8082` | Admin API(本机/内网,可选加白名单) | 全部实例 |
       | `9090` | pprof(仅 debug build) | 全部实例 |
     - 中间件链: `RequestID` → `RealIP` → `Tracing`(在 Logger 前以保证 trace_id 注入)→ `Logger` → `Recoverer` → `RateLimit`(全局 100K/s) → `Auth`
-    - `Auth`: 从 header `Authorization: Bearer <token>` 解析 token,调 `auth.Authenticator.Verify`(由 T1.3 注入 `LocalTokenAuthenticator`);成功得 `auth.Tenant` 注入 ctx
+    - `Auth`: 从 header `Authorization: Bearer <token>` 解析 token,调 `auth.Authenticator.Verify`(由 T1.3 注入 `LocalTokenAuthenticator`);成功得 `auth.Business` 注入 ctx
     - 失败 reason 分类:401(missing/invalid) / 403(revoked);计数 `gateway_auth_fail_total{reason}`
   - `internal/receiver/middleware.go`: rate limit, recover, trace 注入
   - `internal/receiver/server_test.go`:httptest 验证路由/中间件/限流/认证(覆盖 401/200/429/503)
@@ -245,8 +245,8 @@ kill %1                       # 收到 SIGTERM 干净退出
     // Meta 携带请求级元数据,从 receiver 注入到 ctx 中,
     // parser 通过 ctx 取出,不再依赖外部参数透传。
     type Meta struct {
-        Tenant    string // 来自 token.Name
-        TenantID  string // 来自 token.TenantID(未来 IAM 主键,v1 可空)
+        Business    string // 来自 token.Name
+        BusinessID  string // 来自 token.BusinessID(未来 IAM 主键,v1 可空)
         SourceDC  string // 来自 instance tag(--source-dc 启动参数)
         RemoteIP  string // 来自 http.Request.RemoteAddr
         IngestTs  int64  // 进入 GW 时刻(纳秒时间戳,由 receiver 注入)
@@ -259,8 +259,8 @@ kill %1                       # 收到 SIGTERM 干净退出
     ```
   - 实现细节:
     - `ctx` 必带 `Meta`,缺失则视为内部 bug 返回 `error`(panic 而非静默)
-    - 填 `Tenant/SourceDC/IngestTs` 等元数据;**TraceID 不进 Sample**,由 ctx 透传(见 T1.2)
-    - `Labels` 排序(保证 hash 一致),`Tenant/SourceDC` 走 `pkg/stringpool` 复用
+    - 填 `Business/SourceDC/IngestTs` 等元数据;**TraceID 不进 Sample**,由 ctx 透传(见 T1.2)
+    - `Labels` 排序(保证 hash 一致),`Business/SourceDC` 走 `pkg/stringpool` 复用
     - 单条 series 失败不阻断整批,跳过并 `gateway_errors_total{type="parse_series"}` 计数
   - 单测:fixture 文件 + 黄金结果;ctx 缺失 Meta 的负向 case
 
@@ -281,7 +281,7 @@ kill %1                       # 收到 SIGTERM 干净退出
       func Flush(timeout time.Duration) error  // 阻塞等待所有 in-flight 消息 ack 完成
       func Close() error                      // 关闭 client,等所有消息 ack
       ```
-    - **Headers**:`map[string]string`,常规放 `traceparent`、`tenant`、`source_dc`、`ingest_ts` 等元数据;**T1.12 接入 OTel 时填 traceparent**
+    - **Headers**:`map[string]string`,常规放 `traceparent`、`business`、`source_dc`、`ingest_ts` 等元数据;**T1.12 接入 OTel 时填 traceparent**
     - **启动行为**(对应 T1.8 WAL 实现状态):
       - **WAL 未启用(Phase 1 早期)**:探测失败 → 写错误日志并退出(`EXIT_FATAL`),由 systemd `Restart=always` 拉起,失败间隔 5s 内 3 次后触发告警
       - **WAL 已实现(T1.8 完成后)**:探测失败 → 写 warn 日志,以 **WAL 启动模式**运行(写入本地磁盘,后台 goroutine 持续重连),**进程不退出**
@@ -362,7 +362,7 @@ kill %1                       # 收到 SIGTERM 干净退出
 
 - [ ] **T1.13** 暴露第一批指标
   - `internal/obs/metrics.go`:定义 spec 7.1 中列出的指标
-  - 阶段级指标:`gateway_samples_total{stage, tenant, status}`,`gateway_stage_duration_seconds`
+  - 阶段级指标:`gateway_samples_total{stage, business, status}`,`gateway_stage_duration_seconds`
   - 错误指标:`gateway_errors_total{stage, type}`
   - 资源指标:`gateway_goroutines`(用 `runtime.NumGoroutine`)
   - **WAL 指标**:`gateway_wal_bytes`, `gateway_wal_oldest_age_seconds`, `gateway_wal_hard_reject_total`
@@ -397,7 +397,7 @@ go run ./test/loadgen --rate=50000 --duration=30s
     ```go
     type RuleSet struct {
         Name         string
-        Tenant       string
+        Business       string
         DefaultTopic string   // 没路由命中时的兜底 topic
         // InputTopic 字段: GW 不消费 Kafka,故不持有
         // 仅在 spec 5.1 文档中描述"该 ruleset 处理哪类入站数据",运行期不参与逻辑
@@ -615,7 +615,7 @@ curl localhost:8080/metrics | grep gateway_state_series
   - `POST   /v1/rulesets/{name}:rollback?to_version=N` — 回滚
   - `GET    /v1/rulesets/{name}/history` — 历史版本
   - `GET    /v1/healthz` — 复用
-  - `GET    /v1/tenants` — 列出当前生效的 token→tenant 映射
+  - `GET    /v1/businesss` — 列出当前生效的 token→business 映射
   - `GET    /v1/stats` — 运行时统计(per ruleset QPS/drop rate)
 
 - [ ] **T4.6** 历史版本存储
@@ -669,8 +669,8 @@ curl -X POST http://gw:8082/v1/rulesets/foo:rollback?to_version=1
 **Tasks**:
 
 - [ ] **T5.1** 限流细化
-  - 增加 per-tenant 限流器(动态下发)
-  - 监控:`gateway_rate_limit_rejected_total{tenant}`
+  - 增加 per-business 限流器(动态下发)
+  - 监控:`gateway_rate_limit_rejected_total{business}`
 
 - [ ] **T5.2** Kafka 写入优化
   - Producer 调优(linger, batch)基准测试
@@ -776,11 +776,11 @@ make chaos                   # 混沌测试全过
 | **并行化策略缺失** | 2-3 人 4 周压缩依赖并行 | 依赖图:Phase 1 串行完成后,Phase 2 (rule engine) ‖ Phase 4 (admin API + Nacos)可全并行;Phase 3 必须 Phase 2 后;Phase 5 文档/压测可与 Phase 4 部分并行 |
 | **依赖与工具链不完整** | 实施中可能漏装 | 完整列表见 T0.2 + 各 phase 增量:`fsnotify` (T2.10)、`p2` 自实现 (T3.2)、`oapi-codegen` + `redocly/cli` (T4.7)、`chaos-mesh` + `toxiproxy` (T5.5)、`prometheus/client_golang/api/promv1` (T5.9) |
 | **sample load gen 工具不匹配** | vegeta 是 HTTP 压测,不能精确控制每请求 sample 数 | Phase 1 起在 `test/loadgen/client.go` 自研 client(可控 `--rate` `--samples-per-batch`),Phase 5 性能压测复用 |
-| **Sample 内存模型** | 1.5M samples/s 持续下 string 分配会爆 GC | TraceID 走 request-scoped context(T1.12);Tenant/SourceDC 字符串 intern 池;T1.2 类型定义已加注释,实施时 `pkg/stringpool` 实现 |
+| **Sample 内存模型** | 1.5M samples/s 持续下 string 分配会爆 GC | TraceID 走 request-scoped context(T1.12);Business/SourceDC 字符串 intern 池;T1.2 类型定义已加注释,实施时 `pkg/stringpool` 实现 |
 | **Prometheus server 假设** | T5.6 大盘需要外部 Prometheus 抓 GW /metrics | 假设运维已部署 Prometheus(由 `docs/operations/deploy.md` 列出),不在本项目范围 |
 | **GitHub Actions CI 假设** | 仓库可能在 GitLab/自建 Gitea | T0.5 写 GitHub Actions 作默认,如不是 GitHub 再补 GitLab CI |
 | **WAL 目录 IO 隔离** | 系统盘与 WAL 盘共抢 IO 导致 fsync 延迟 | 部署文档(`/docs/operations/deploy.md`)强制要求 `/data/wal` 独立挂载 SSD,IOPS ≥ 5K;ansible role 加挂载断言 |
-| **限流维度选择** | 全局 vs per-tenant 限流位置选错,导致被攻击租户拖垮所有 | T1.4 全局 100K/s(防单实例) + T5.1 per-tenant 动态下发(防单租户);两者并存,per-tenant 默认 80K/s |
+| **限流维度选择** | 全局 vs per-business 限流位置选错,导致被攻击business拖垮所有 | T1.4 全局 100K/s(防单实例) + T5.1 per-business 动态下发(防单business);两者并存,per-business 默认 80K/s |
 | **规则 history 内存增长** | 长生命周期下 in-memory history 膨胀 | T4.6 用 ring buffer 限 10 版 + 单版 ≤ 1MB YAML,超限 LRU 驱逐;`gateway_ruleset_history_size` 指标 |
 | **OTel SDK 自身开销** | 高吞吐下 SDK 自身 CPU/内存占大头 | T1.12 选用 BatchSpanProcessor(默认),不启用 Console exporter;Phase 5 末做 profile,如 SDK > 5% CPU 改用 lightweight tracer 抽象 |
 | **Pipeline 切换时的批次丢失** | 切换瞬间 in-flight 批次被丢弃 | T2.7 旧规则跑完当前批次才生效新规则(per-batch load);切换过程中 `gateway_ruleset_switch_total{from_version, to_version, reason}` 计数,reason ∈ {nacos, file, api} |
@@ -825,8 +825,8 @@ make chaos                   # 混沌测试全过
 
 ### F.1 当前实现(T1.3 + T1.4)
 
-- `internal/config.TokenStore` 持有 `token → TenantInfo` 内存映射
-- `receiver.Auth` 中间件从 `Authorization: Bearer <token>` 取 token,查表得 `tenant/default_topic/rate_limit`
+- `internal/config.TokenStore` 持有 `token → BusinessInfo` 内存映射
+- `receiver.Auth` 中间件从 `Authorization: Bearer <token>` 取 token,查表得 `business/default_topic/rate_limit`
 - 启动时加载 `configs/tokens.yaml`,SIGHUP 重载
 - **未做**:签名验证、过期、吊销、审计
 
@@ -835,7 +835,7 @@ make chaos                   # 混沌测试全过
 | 当前实现 | 未来 IAM 实现 | 替换点 |
 |---|---|---|
 | `internal/config.TokenStore`(内存 map) | `internal/auth.Authenticator` 接口(本地实现 + IAM 实现并存) | receiver.Auth 中间件改为调 `Authenticator.Verify(ctx, token)` |
-| `Bearer <token>` 头 | 可能加 `Cookie`/`mTLS`/`OIDC JWT` | 仅改 Auth 中间件,下游 `Meta.Tenant` 来源不变 |
+| `Bearer <token>` 头 | 可能加 `Cookie`/`mTLS`/`OIDC JWT` | 仅改 Auth 中间件,下游 `Meta.Business` 来源不变 |
 | 启动加载 YAML | 启动时 JWKS 拉取 + 周期刷新 | 新增 `internal/auth/jwks.go`,鉴权失败有缓存回退 |
 | SIGHUP 重载 tokens.yaml | IAM 端点 / Nacos 推 token 列表 | 删除 `configs/tokens.yaml`,走 Nacos 配置中心(与 T4.1 复用) |
 
@@ -846,10 +846,10 @@ make chaos                   # 混沌测试全过
    package auth
 
    type Authenticator interface {
-       // Verify 返回 tenant 与默认 topic;err != nil → 401
-       Verify(ctx context.Context, token string) (Tenant, error)
+       // Verify 返回 business 与默认 topic;err != nil → 401
+       Verify(ctx context.Context, token string) (Business, error)
    }
-   type Tenant struct {
+   type Business struct {
        Name         string
        DefaultTopic string
        RateLimit    int
@@ -857,7 +857,7 @@ make chaos                   # 混沌测试全过
    ```
    当前 v1 实现 `LocalTokenAuthenticator` 内嵌在 `internal/config` 即可,但**函数签名应与 F.3 一致**,未来不需改 receiver。
 
-2. **Tenant 元数据扩展**:在 `internal/parser.Meta`(T1.6)中预留 `TenantID string`(用于审计、上报到 IAM),当前空字符串即可。
+2. **Business 元数据扩展**:在 `internal/parser.Meta`(T1.6)中预留 `BusinessID string`(用于审计、上报到 IAM),当前空字符串即可。
 
 3. **审计日志**:在 `Auth` 中间件失败分支预留 `auth_fail_total{reason}` 指标点,reason ∈ {missing, invalid, expired, revoked, iam_unavailable};v1 只打 `invalid`。
 
@@ -875,6 +875,6 @@ make chaos                   # 混沌测试全过
 ### F.5 不在本计划的可观测/安全收益
 
 - 集中审计(token 用量、调用方 IP、限流命中可上送 IAM)
-- 细粒度 RBAC(目前只到 tenant 粒度)
+- 细粒度 RBAC(目前只到 business 粒度)
 - token 轮换自动化(目前只支持 SIGHUP 全量重载)
 - 跨服务统一登录态(目前各服务独立 token)

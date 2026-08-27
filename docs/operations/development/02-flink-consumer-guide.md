@@ -17,7 +17,7 @@ Prometheus ─remote_write─> prom-gw ─> Kafka ─> Flink(本文档) ─Strea
                                   zstd(Kafka 端)             跨城专线(仅 5m 主体)
 ```
 
-Flink 在本城完成 **5 min 滚动窗口聚合**,跨城写入北京 StarRocks `sr_bj_metrics_5m` 表;**1h / 1d 聚合由 StarRocks 周期任务从 5m 表级联聚合**,不在 Flink 端独立输出。
+Flink 在本城完成 **5 min 滚动窗口聚合**,跨城写入北京 StarRocks `metrics_5m` 表;**1h / 1d 聚合由 StarRocks 周期任务从 5m 表级联聚合**,不在 Flink 端独立输出。
 
 ### 1.2 Flink 作业划分
 
@@ -52,10 +52,10 @@ Flink 在本城完成 **5 min 滚动窗口聚合**,跨城写入北京 StarRocks 
 ┌─────────────────────────────────────────────────────────────┐
 │ Kafka Message                                               │
 │                                                             │
-│   Topic:    prom.<city>.<stage>.<tenant>                    │
+│   Topic:    prom.<city>.<stage>.<business>                  │
 │   Key:      <SeriesKey 十进制字符串>  (uint64 FNV-1a hash)  │
 │   Value:    <snappy 压缩的 prompb.WriteRequest 字节>        │
-│   Headers:  tenant / source_dc / ingest_city / ...          │
+│   Headers:  business / source_dc / ingest_city / ...        │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -125,13 +125,13 @@ for _, s := range cur {
 
 ### 2.4 Kafka Headers(必读)
 
-**租户和机房信息不在 payload 里,在 Kafka header**。payload 是 Prometheus 发来的原始字节,Prometheus 不知道这些信息。
+**业务和机房信息不在 payload 里,在 Kafka header**。payload 是 Prometheus 发来的原始字节,Prometheus 不知道这些信息。
 
 构造点:[cmd/prom-gw/main.go:419-427](../../cmd/prom-gw/main.go):
 
 | Header 名 | 类型 | 说明 | 示例 |
 |---|---|---|---|
-| `tenant` | string | 租户名(来自 token 鉴权) | `app-business` |
+| `business` | string | 业务名(来自 token 鉴权) | `app-business` |
 | `source_dc` | string | 来源机房(来自 `X-Source-DC` 头或 `--source-dc` flag) | `五联` |
 | `ingest_city` | string | 城市:`bj` / `sz` / `hf` | `sz` |
 | `ingest_dc` | string | 写入 prom-gw 的机房标识 | `dc-sz-5union` |
@@ -143,7 +143,7 @@ Flink 必须从 header 提取这些字段写入 StarRocks,不能从 payload 解�
 ### 2.5 Key(SeriesKey)说明
 
 - **格式**:`uint64` 十进制字符串(如 `"12345678901234567890"`)
-- **算法**:FNV-1a 64,基于 `tenant + metric + sorted labels` 拼接哈希
+- **算法**:FNV-1a 64,基于 `business + metric + sorted labels` 拼接哈希
 - **用途**:同 series 落同 partition,保证时间顺序
 - **不可反解**:Key 只是哈希值,要拿 series 信息必须解码 payload
 - **Flink 用途**:作为 keyBy 的依据,同 series 路由到同一 subtask,保证窗口内状态一致
@@ -152,8 +152,8 @@ Flink 必须从 header 提取这些字段写入 StarRocks,不能从 payload 解�
 
 | 环境 | 原始 topic | 路由后 topic |
 |---|---|---|
-| 本地 | `prom.local.routed.<tenant>` | `prom.local.routed.<biz>` |
-| 生产 | `prom.<city>.raw.<tenant>` | `prom.<city>.routed.<biz>` 或 `prom.<city>.cleaned.<biz>` |
+| 本地 | `prom.local.routed.<business>` | `prom.local.routed.<biz>` |
+| 生产 | `prom.<city>.raw.<business>` | `prom.<city>.routed.<biz>` 或 `prom.<city>.cleaned.<biz>` |
 
 Flink 通常消费 **路由后(cleaned/routed)的 topic**,因为这些数据已经过 relabel/route 清洗。若要消费原始数据,订阅 raw topic。
 
@@ -204,10 +204,9 @@ Flink 通常消费 **路由后(cleaned/routed)的 topic**,因为这些数据已�
 
 ```sql
 -- ===== 5 min 表:Flink 跨城 Stream Load 唯一写入点,留存 7 天 =====
-CREATE TABLE sr_bj_metrics_5m (
+CREATE TABLE metrics_5m (
   ts            DATETIME     NOT NULL COMMENT '5 min 窗口起始时间(UTC+8)',
   metric        VARCHAR(128) NOT NULL,
-  tenant        VARCHAR(64)  NOT NULL,
   business      VARCHAR(64)  NOT NULL,
   ingest_city   VARCHAR(16)  NOT NULL COMMENT 'bj/sz/hf',
   source_dc     VARCHAR(32)  NOT NULL,
@@ -222,9 +221,9 @@ CREATE TABLE sr_bj_metrics_5m (
   value_p99     DOUBLE,
   ingest_time   DATETIME     NOT NULL COMMENT '入 StarRocks 时间(DLQ 重放去重用)'
 ) ENGINE=OLAP
-  PRIMARY KEY(ts, metric, tenant, business, ingest_city, source_dc, labels_hash)
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, labels_hash)
   PARTITION BY RANGE(ts) ()
-  DISTRIBUTED BY HASH(metric, tenant) BUCKETS 32
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 32
   PROPERTIES (
     "storage_medium" = "SSD",
     "dynamic_partition.enable" = "true",
@@ -244,10 +243,10 @@ CREATE TABLE sr_bj_metrics_5m (
 
 ```sql
 -- 每小时执行:从 5m 表聚合到 1h 表
-INSERT OVERWRITE sr_bj_metrics_1h
+INSERT OVERWRITE metrics_1h
 SELECT
   date_trunc('hour', ts) AS ts,
-  metric, tenant, business, ingest_city, source_dc, labels_hash,
+  metric, business, ingest_city, source_dc, labels_hash,
   max(labels) AS labels,
   sum(sample_count) AS sample_count,
   sum(value_sum) AS value_sum,
@@ -257,10 +256,10 @@ SELECT
   percentile_approx(value_p50, sample_count) AS value_p50,
   percentile_approx(value_p99, sample_count) AS value_p99,
   max(ingest_time) AS ingest_time
-FROM sr_bj_metrics_5m
+FROM metrics_5m
 WHERE ts >= date_trunc('hour', now() - interval 1 hour)
   AND ts <  date_trunc('hour', now())
-GROUP BY date_trunc('hour', ts), metric, tenant, business, ingest_city, source_dc, labels_hash;
+GROUP BY date_trunc('hour', ts), metric, business, ingest_city, source_dc, labels_hash;
 
 -- 每天执行:从 1h 表聚合到 1d 表(级联,不跳级)
 -- SQL 结构同上,改 date_trunc('day', ...) 和表名
@@ -429,7 +428,7 @@ import java.util.Map;
  * prom-gw 写入 Kafka 的消息格式:
  *   Value  = snappy(protobuf(WriteRequest))  (Kafka 端 zstd 由 connector 自动解)
  *   Key    = SeriesKey 十进制字符串(uint64 FNV-1a hash)
- *   Headers: tenant / source_dc / ingest_city / ingest_dc / ingest_time_ms / traceparent
+ *   Headers: business / source_dc / ingest_city / ingest_dc / ingest_time_ms / traceparent
  *
  * 关键:一条 Kafka 消息 = 一个 sample 的 Key + 整个 WriteRequest 的 payload。
  * 一个 WriteRequest 含 N 个 sample 会产生 N 条消息,payload 相同,Key 不同。
@@ -464,8 +463,8 @@ public class PromWriteRequestDecoder
         WriteRequestParser.ParsedWriteRequest parsed =
                 WriteRequestParser.parse(protobufBytes);
 
-        // 3. 从 header 提取租户/机房信息
-        String tenant       = headers != null ? headers.get("tenant")       : "";
+        // 3. 从 header 提取业务/机房信息
+        String business    = headers != null ? headers.get("business")       : "";
         String sourceDc     = headers != null ? headers.get("source_dc")    : "";
         String ingestCity   = headers != null ? headers.get("ingest_city")   : "";
         String ingestDc     = headers != null ? headers.get("ingest_dc")     : "";
@@ -475,7 +474,7 @@ public class PromWriteRequestDecoder
         // 4. 返回 POJO(包含整个 WriteRequest 的所有 sample + 元数据)
         return PromSample.builder()
                 .timeseries(parsed.getTimeseries())
-                .tenant(tenant)
+                .business(business)
                 .sourceDc(sourceDc)
                 .ingestCity(ingestCity)
                 .ingestDc(ingestDc)
@@ -680,7 +679,7 @@ public class KafkaRecordDeserializer implements KafkaRecordDeserializationSchema
 
 ### 8.1 窗口分配
 
-按 `metric + tenant + sortedLabels` 作 key,5 min 滚动窗口:
+按 `metric + business + sortedLabels` 作 key,5 min 滚动窗口:
 
 ```java
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
@@ -704,7 +703,7 @@ DataStream<SampleWithMeta> withWatermark = samples
 // 3. keyBy(seriesKey) + 5min tumbling window
 DataStream<AggResult> aggStream = withWatermark
     .keyBy(rec -> LabelsHasher.seriesKey(
-        rec.getTenant(), rec.getMetric(), rec.getLabels()))
+        rec.getBusiness(), rec.getMetric(), rec.getLabels()))
     .window(TumblingEventTimeWindows.of(Time.minutes(5)))
     .aggregate(new MetricAggFunction(), new AggWindowFunction())
     .name("agg-5min");
@@ -730,8 +729,8 @@ public class MetricAggFunction
         acc.max = Math.max(acc.max, rec.getValue());
         acc.min = acc.count == 1 ? rec.getValue() : Math.min(acc.min, rec.getValue());
         acc.samples.add(rec.getValue());   // 用于 p50/p99 计算
-        if (acc.tenant == null) {
-            acc.tenant     = rec.getTenant();
+        if (acc.business == null) {
+            acc.business    = rec.getBusiness();
             acc.metric     = rec.getMetric();
             acc.labels     = rec.getLabels();
             acc.sourceDc   = rec.getSourceDc();
@@ -794,7 +793,7 @@ public class AggWindowFunction
         // 窗口起始时间(UTC+8,转 datetime)
         r.setTs(windowStartToLocalDateTime(ctx.window().getStart()));
         r.setMetric(s.metric);
-        r.setTenant(s.tenant);
+        r.setBusiness(s.business);
         r.setBusiness(extractBusiness(s.labels));   // 从 labels 提取 business 字段
         r.setIngestCity(s.ingestCity);
         r.setSourceDc(s.sourceDc);
@@ -837,14 +836,14 @@ StarRocksSinkOptions options = StarRocksSinkOptions.builder()
     .withProperty("jdbc-url", "jdbc:mysql://<fe-vip>:9030")
     .withProperty("load-url", "http://<fe-vip>:8030")
     .withProperty("database-name", "default_cluster:prom")
-    .withProperty("table-name", "sr_bj_metrics_5m")
+    .withProperty("table-name", "metrics_5m")
     .withProperty("username", "root")
     .withProperty("password", "")
     .withProperty("sink.label-prefix", "sz_5m")     // 每城唯一,避免跨城冲突
     .withProperty("sink.properties.format", "json")
     .withProperty("sink.properties.strip_outer_array", "true")
     .withProperty("sink.properties.columns",
-        "ts,metric,tenant,business,ingest_city,source_dc,labels_hash," +
+        "ts,metric,business,ingest_city,source_dc,labels_hash," +
         "labels,sample_count,value_sum,value_max,value_min,value_avg," +
         "value_p50,value_p99,ingest_time")
     .withProperty("sink.buffer-flush.max-rows", "50000")
@@ -1246,7 +1245,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 # 4. 验证 StarRocks 收到数据
 mysql -h <starrocks-fe> -P 9060 -u root -e "
   SELECT count(*), min(ts), max(ts)
-  FROM prom.sr_bj_metrics_5m
+  FROM prom.metrics_5m
   WHERE ingest_city = 'local';"
 
 # 5. 验证聚合正确性(对比 Prometheus 原始值)
@@ -1273,7 +1272,7 @@ public class PromWriteRequestDecoderTest {
 
         // 模拟 Kafka header
         Map<String, String> headers = Map.of(
-            "tenant", "app-business",
+            "business", "app-business",
             "source_dc", "dc-local-dev",
             "ingest_city", "local",
             "ingest_time_ms", "1786431389413"
@@ -1282,7 +1281,7 @@ public class PromWriteRequestDecoderTest {
         PromSample sample = new PromWriteRequestDecoder()
             .deserialize(null, snappyBytes, "test", 0L, headers);
 
-        assertEquals("app-business", sample.getTenant());
+        assertEquals("app-business", sample.getBusiness());
         assertEquals("local", sample.getIngestCity());
         assertEquals(1, sample.getTimeseries().size());
         assertEquals("up", sample.getTimeseries().get(0).getMetricName());
@@ -1315,7 +1314,7 @@ flink run \
   --starrocks-host <beijing-fe-vip> \
   --starrocks-port 8030 \
   --starrocks-db prom \
-  --starrocks-table sr_bj_metrics_5m \
+  --starrocks-table metrics_5m \
   --starrocks-user root \
   --label-prefix sz_5m \
   --sr-batch-size 500 \

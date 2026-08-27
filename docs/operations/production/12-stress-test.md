@@ -55,7 +55,7 @@ prom-gw 自带两个压测工具,无需引入第三方依赖:
 | 容量阶梯 | 寻找性能拐点 | 100K → 500K → 1M → 1.5M → 2M | 每档 3min | 容量规划 |
 | 稳定性测试 | 检测内存/FD/goroutine 泄漏 | 1.5M samples/s | 1h+ | 发版前 |
 | 故障注入 | 验证降级行为 | 1M samples/s | 5min | 发版前 |
-| 多租户测试 | 验证限流与隔离 | 多 token 并发 | 5min | 上线前 |
+| 多business测试 | 验证限流与隔离 | 多 token 并发 | 5min | 上线前 |
 
 ### 2.2 测试环境要求
 
@@ -182,7 +182,7 @@ loadgen 通过以下 flag 控制负载模型:
 | `--concurrency` | 4 | 并发 worker 数 | 4-8,过多会争抢 CPU |
 | `--duration` | 30s | 压测时长 | 冒烟 30s,基线 5min,稳定性 1h |
 | `--series-count` | 10000 | series 池大小 | 10000(模拟中型集群),高基数测试设 100000 |
-| `--token` | `tk_app_business_dev` | Bearer token | 多租户测试切换不同 token |
+| `--token` | `tk_app_business_dev` | Bearer token | 多business测试切换不同 token |
 | `--url` | `http://127.0.0.1:19201/api/v1/write` | RemoteWrite URL | 指向被测实例 |
 | `--metrics-url` | (空) | GW metrics URL | 填写后压测结束自动拉取 GW 指标 |
 
@@ -248,15 +248,15 @@ bandwidth = 3000 × 4KB = 12 MB/s ≈ 96 Mbps
 --rate=500000 --samples-per-batch=50 --concurrency=16 --series-count=5000 --duration=300s
 ```
 
-#### 场景 5:多租户负载
+#### 场景 5:多business负载
 
-模拟多租户并发,需开多个 loadgen 进程:
+模拟多business并发,需开多个 loadgen 进程:
 
 ```bash
-# 终端 1: app-business 租户
+# 终端 1: app-business business
 go run ./test/loadgen --token=tk_app_business_dev --rate=800000 --duration=300s &
 
-# 终端 2: infra 租户
+# 终端 2: infra business
 go run ./test/loadgen --token=tk_infra_dev --rate=500000 --duration=300s &
 ```
 
@@ -522,17 +522,17 @@ kill $(pidof kafka)
 # 4. metrics: gateway_wal_hard_reject_total 应 > 0
 ```
 
-### 4.7 多租户限流测试
+### 4.7 多business限流测试
 
 ```bash
 # 启动 prom-gw(token 配置:app-business=80K/s, infra=50K/s)
 ./bin/prom-gw --tokens=configs/tokens/local.yaml ... &
 
-# 同时压两个租户,各超过其限流
+# 同时压两个business,各超过其限流
 go run ./test/loadgen --token=tk_app_business_dev --rate=120000 --duration=60s &
 go run ./test/loadgen --token=tk_infra_dev --rate=80000 --duration=60s &
 
-# 观察:gateway_rate_limit_rejected_total{tenant="app-business"} 应增长
+# 观察:gateway_rate_limit_rejected_total{business="app-business"} 应增长
 # app-business 超过 80K/s 的部分被 429 拒绝
 ```
 
@@ -955,7 +955,7 @@ downsample / deadvalue 等状态型 stage 会缓存 series 状态,series 数直�
 |---|---|---|---|
 | 小型集群 | < 10K | < 500MB | 无需优化 |
 | 中型集群 | 10K-100K | 500MB-5GB | relabel 删除无用标签 |
-| 大型集群 | > 100K | > 5GB | sample 降采样 + 分租户 |
+| 大型集群 | > 100K | > 5GB | sample 降采样 + 分business |
 
 **relabel 优化示例**(减少 series 基数):
 
@@ -1028,7 +1028,7 @@ stages:
 | `GOGC` | systemd env | 100 | 200(吞吐) | GC 频率 |
 | `GOMEMLIMIT` | systemd env | 无 | 6GiB(8G 机器) | 内存上限 |
 | `channel_buffer` | ruleset yaml | 65535 | 16384-65535 | 延迟 vs 背压 |
-| `rate_limit` | token yaml | 80000 | 按租户调整 | 限流阈值 |
+| `rate_limit` | token yaml | 80000 | 按business调整 | 限流阈值 |
 | `--wal-max-bytes` | CLI flag | 50GB | 100GB | WAL 容量 |
 | `--wal-disk-used-ratio` | CLI flag | 0.80 | 0.85 | 磁盘硬拒绝阈值 |
 | `samples-per-batch` | loadgen | 500 | 100-1000 | 压测负载模型 |
@@ -1125,7 +1125,7 @@ rm -rf /tmp/perf-kafka-wal
 # configs/rules/perf-heavy.yaml
 rulesets:
   - name: perf-heavy
-    tenant: app-business
+    business: app-business
     default_topic: prom.perf.routed.app_business
     version: 1
     match:

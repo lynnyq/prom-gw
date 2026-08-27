@@ -501,7 +501,7 @@ scp target/flink-agg5m-starrocks-1.0.0.jar jm-1:/appdata/flink/jobs/
   --starrocks-host <beijing-fe-vip> \
   --starrocks-port 8030 \
   --starrocks-db prom \
-  --starrocks-table sr_bj_metrics_5m \
+  --starrocks-table metrics_5m \
   --starrocks-user root \
   --starrocks-password "" \
   --label-prefix sz_5m \
@@ -1015,7 +1015,7 @@ curl -s http://jm-1:8081/jobs/<job-id>/checkpoints | python3 -m json.tool
 | `--starrocks-host` | `localhost` | StarRocks FE VIP |
 | `--starrocks-port` | `8030` | StarRocks FE HTTP 端口(Stream Load 复用,无 8070) |
 | `--starrocks-db` | `prom` | StarRocks 数据库 |
-| `--starrocks-table` | `sr_bj_metrics_5m` | StarRocks 表名 |
+| `--starrocks-table` | `metrics_5m` | StarRocks 表名 |
 | `--starrocks-user` | `root` | StarRocks 用户名 |
 | `--starrocks-password` | (空) | StarRocks 密码 |
 | `--label-prefix` | `local_5m` | Stream Load label 前缀(每城唯一) |
