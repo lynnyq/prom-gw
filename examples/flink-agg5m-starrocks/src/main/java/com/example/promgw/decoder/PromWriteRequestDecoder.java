@@ -30,7 +30,7 @@ public class PromWriteRequestDecoder implements Serializable {
      * decode 解码一条 Kafka 消息。
      *
      * @param value   snappy 压缩的 WriteRequest 字节(Kafka 端 zstd 已由 connector 自动解)
-     * @param headers Kafka headers(含 tenant/source_dc/ingest_city/...)
+     * @param headers Kafka headers(含 business/source_dc/ingest_city/...)
      * @return PromSample POJO(含所有 timeseries + 元数据)
      */
     public PromSample decode(byte[] value, Map<String, String> headers) throws IOException {

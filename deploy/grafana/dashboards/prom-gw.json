@@ -193,8 +193,8 @@
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["last", "max"]}, "tooltip": {"mode": "multi"}},
       "targets": [
         {
-          "expr": "sum by (tenant) (rate(gateway_bytes_in_total[1m]))",
-          "legendFormat": "in {{tenant}}",
+          "expr": "sum by (business) (rate(gateway_bytes_in_total[1m]))",
+          "legendFormat": "in {{business}}",
           "refId": "A"
         },
         {

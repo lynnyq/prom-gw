@@ -15,7 +15,7 @@ import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
  * prom-gw 写入 Kafka 的消息:
  *   key    = SeriesKey 十进制字符串(uint64 FNV-1a hash,不可反解)
  *   value  = snappy(prompb.WriteRequest protobuf)  (Kafka 端 zstd 由 connector 自动解)
- *   headers: tenant / source_dc / ingest_city / ingest_dc / ingest_time_ms / traceparent
+ *   headers: business / source_dc / ingest_city / ingest_dc / ingest_time_ms / traceparent
  *
  * 为什么不用 Flink 内置的 ConsumerRecord?
  *   - 需要在算子间传递完整的 key+value+headers,内置类型不便于 POJO 序列化

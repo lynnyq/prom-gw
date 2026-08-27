@@ -46,14 +46,14 @@ class FlinkSerializationAuditTest {
     @Test
     void testKafkaRecordSerializable() throws Exception {
         Map<String, String> headers = new HashMap<>();
-        headers.put("tenant", "app-business");
+        headers.put("business", "app-business");
         KafkaRecord rec = new KafkaRecord(
                 "key".getBytes(), "value".getBytes(), "topic", 100L, 0, 1234L, headers);
         byte[] bytes = InstantiationUtil.serializeObject(rec);
         KafkaRecord restored = InstantiationUtil.deserializeObject(bytes, getClass().getClassLoader());
         assertThat(restored.getTopic()).isEqualTo("topic");
         assertThat(restored.getOffset()).isEqualTo(100L);
-        assertThat(restored.getHeaders()).containsEntry("tenant", "app-business");
+        assertThat(restored.getHeaders()).containsEntry("business", "app-business");
     }
 
     @Test
@@ -63,10 +63,10 @@ class FlinkSerializationAuditTest {
         samples.add(new PromSample.ParsedSample(1.0, 1700000000000L));
         ts.add(new PromSample.ParsedSeries("up", new HashMap<>(), samples));
 
-        PromSample ps = new PromSample(ts, "tenant1", "dc-bj", "bj", "dc-bj", 1700000000000L, "trace-1");
+        PromSample ps = new PromSample(ts, "business1", "dc-bj", "bj", "dc-bj", 1700000000000L, "trace-1");
         byte[] bytes = InstantiationUtil.serializeObject(ps);
         PromSample restored = InstantiationUtil.deserializeObject(bytes, getClass().getClassLoader());
-        assertThat(restored.getTenant()).isEqualTo("tenant1");
+        assertThat(restored.getBusiness()).isEqualTo("business1");
         assertThat(restored.getTimeseries()).hasSize(1);
         assertThat(restored.getTimeseries().get(0).getSamples()).hasSize(1);
         assertThat(restored.getTimeseries().get(0).getSamples().get(0).getValue()).isEqualTo(1.0);
@@ -77,7 +77,7 @@ class FlinkSerializationAuditTest {
         Map<String, String> labels = new HashMap<>();
         labels.put("job", "prometheus");
         SampleWithMeta swm = new SampleWithMeta(
-                "tenant", "up", labels, 1.0, 1700000000000L,
+                "business", "up", labels, 1.0, 1700000000000L,
                 "dc-bj", "bj", "dc-bj", 1700000000000L, "trace-1");
         byte[] bytes = InstantiationUtil.serializeObject(swm);
         SampleWithMeta restored = InstantiationUtil.deserializeObject(bytes, getClass().getClassLoader());
@@ -91,7 +91,6 @@ class FlinkSerializationAuditTest {
         AggResult r = new AggResult();
         r.setTs(new Date(1700000000000L));
         r.setMetric("up");
-        r.setTenant("tenant1");
         r.setBusiness("team-a");
         r.setLabelsHash("abc12345");
         r.setSampleCount(10);
@@ -118,7 +117,7 @@ class FlinkSerializationAuditTest {
         state.min = 1.0;
         state.samples.add(1.0);
         state.samples.add(20.0);
-        state.tenant = "tenant1";
+        state.business = "business1";
         state.metric = "up";
 
         byte[] bytes = InstantiationUtil.serializeObject(state);
@@ -126,7 +125,7 @@ class FlinkSerializationAuditTest {
         assertThat(restored.count).isEqualTo(5);
         assertThat(restored.sum).isEqualTo(50.0);
         assertThat(restored.samples).hasSize(2);
-        assertThat(restored.tenant).isEqualTo("tenant1");
+        assertThat(restored.business).isEqualTo("business1");
     }
 
     @Test

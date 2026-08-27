@@ -19,8 +19,8 @@ import org.slf4j.LoggerFactory;
  *
  * 计算内容:
  *   - ts:           窗口起始时间(UTC+8)
- *   - business:     从 labels 提取("team" 或 "tenant" 字段)
- *   - labelsHash:   labels 的 XXH3 hash(与 prom-gw 端对齐)
+ *   - business:     从 labels 提取("team" 或 "service" 字段)
+ *   - labelsHash:   labels 的 SHA-1 hash(与 prom-gw 端对齐)
  *   - valueAvg:     sum / count
  *   - valueP50/P99: 桶内排序精确计算
  */
@@ -46,8 +46,7 @@ public class AggWindowFunction
         // 窗口起始时间(UTC+8)
         r.setTs(toBJDate(ctx.window().getStart()));
         r.setMetric(s.metric);
-        r.setTenant(s.tenant);
-        r.setBusiness(extractBusiness(s.labels, s.tenant));
+        r.setBusiness(extractBusiness(s.labels));
         r.setIngestCity(s.ingestCity);
         r.setSourceDc(s.sourceDc);
         r.setLabelsHash(LabelsHasher.hash(s.labels));
@@ -67,21 +66,21 @@ public class AggWindowFunction
         r.setIngestTime(new Date());
 
         if (LOG.isDebugEnabled()) {
-            LOG.debug("agg emitted: metric={}, tenant={}, count={}, ts={}",
-                    r.getMetric(), r.getTenant(), r.getSampleCount(), r.getTs());
+            LOG.debug("agg emitted: metric={}, business={}, count={}, ts={}",
+                    r.getMetric(), r.getBusiness(), r.getSampleCount(), r.getTs());
         }
         out.collect(r);
     }
 
-    /** extractBusiness 从 labels 提取业务标识,优先级:team > service > tenant。 */
-    private static String extractBusiness(Map<String, String> labels, String tenant) {
+    /** extractBusiness 从 labels 提取业务标识,优先级:team > service。 */
+    private static String extractBusiness(Map<String, String> labels) {
         if (labels != null) {
             String team = labels.get("team");
             if (team != null && !team.isEmpty()) return team;
             String service = labels.get("service");
             if (service != null && !service.isEmpty()) return service;
         }
-        return tenant != null ? tenant : "unknown";
+        return "unknown";
     }
 
     /** toBJDate 把毫秒时间戳转成北京时区的 Date。 */

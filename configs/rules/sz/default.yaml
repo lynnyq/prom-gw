@@ -18,7 +18,7 @@ rulesets:
   # ── app-business 租户规则集 ──
   # 收到 remote_write 后同步处理:relabel + route,直接写入 routed topic
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.sz.routed.app_business   # 路由未命中时的兜底 topic
     version: 1
     match:
@@ -52,7 +52,7 @@ rulesets:
   # ── infra 租户规则集 ──
   # 基础设施指标通常不按 team 分桶,直接写入 routed.infra
   - name: infra
-    tenant: infra
+    business: infra
     default_topic: prom.sz.routed.infra           # 写入的 topic
     version: 1
     match:

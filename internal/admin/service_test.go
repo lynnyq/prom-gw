@@ -17,10 +17,10 @@ import (
 // --- mock AuthProvider ---
 
 type mockAuth struct {
-	tenants []auth.Tenant
+	businesses []auth.Business
 }
 
-func (m *mockAuth) ListTenants() []auth.Tenant { return m.tenants }
+func (m *mockAuth) ListBusinesses() []auth.Business { return m.businesses }
 
 // --- helpers ---
 
@@ -31,8 +31,8 @@ func newSvc(t *testing.T) (*ManagerService, *config.History) {
 	s := NewManagerService(ManagerDeps{
 		Manager: config.NewManager(config.ManagerConfig{Logger: zap.NewNop(), History: h}),
 		RuleMgr: mgr,
-		Auth: &mockAuth{tenants: []auth.Tenant{
-			{Name: "app-business", TenantID: "1001", DefaultTopic: "prom.app", RateLimit: 80000},
+		Auth: &mockAuth{businesses: []auth.Business{
+			{Name: "app-business", BusinessID: "1001", DefaultTopic: "prom.app", RateLimit: 80000},
 		}},
 		History: h,
 		Logger:  zap.NewNop(),
@@ -188,11 +188,11 @@ rulesets:
 	assert.Len(t, list, 3)
 }
 
-func TestService_ListTenants(t *testing.T) {
+func TestService_ListBusinesses(t *testing.T) {
 	s, _ := newSvc(t)
-	out := s.ListTenants(context.Background())
+	out := s.ListBusinesses(context.Background())
 	require.Len(t, out, 1)
-	assert.Equal(t, "app-business", out[0].Tenant)
+	assert.Equal(t, "app-business", out[0].Business)
 }
 
 func TestService_Stats(t *testing.T) {

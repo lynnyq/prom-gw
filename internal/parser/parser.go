@@ -3,7 +3,7 @@
 // 设计要点(spec T1.6):
 //   - Meta 走 ctx(由 receiver 注入),不依赖外部参数透传
 //   - TraceID 不进 Sample,由 ctx 透传(避免 GC 压力)
-//   - Tenant/SourceDC 走 stringpool.Intern
+//   - Business/SourceDC 走 stringpool.Intern
 //   - Labels 排序后入 sample,保证 SeriesKey 一致
 //   - 单条 series 失败不阻断整批,记 gateway_errors_total{type="parse_series"}
 package parser
@@ -20,8 +20,7 @@ import (
 
 // Meta 携带请求级元数据,从 receiver 注入到 ctx 中。
 type Meta struct {
-	Tenant     string // 来自 token.Name
-	TenantID   string // 来自 token.TenantID(未来 IAM 主键,v1 可空)
+	Business   string // 来自 token.Name
 	SourceDC   string // 来自 instance tag(--source-dc 启动参数)或 X-Source-DC 头
 	RemoteIP   string // 来自 http.Request.RemoteAddr
 	IngestTs   int64  // 进入 GW 时刻(纳秒时间戳,由 receiver 注入)
@@ -55,8 +54,8 @@ type ParseResult struct {
 // Parse 把 req 转换为 []Sample;ctx 必带 Meta(由 receiver.Auth 中间件注入)。
 //
 // 失败语义:
-//   - ctx 缺 Meta -> ErrMetaMissing(调用方应 panic / fast-fail)
-//   - 单条 series 解析失败 -> 跳过 + 计数,继续处理剩余
+//   - ctx 缺 Meta → ErrMetaMissing(调用方应 panic / fast-fail)
+//   - 单条 series 解析失败 → 跳过 + 计数,继续处理剩余
 func Parse(ctx context.Context, req *prompb.WriteRequest) (ParseResult, error) {
 	meta, ok := MetaFromContext(ctx)
 	if !ok {
@@ -115,8 +114,7 @@ func convertTimeSeries(ts *prompb.TimeSeries, meta *Meta, ingestMs int64) (Sampl
 	pb := ts.Samples[0]
 
 	return Sample{
-		Tenant:     stringpool.Intern(meta.Tenant),
-		TenantID:   stringpool.Intern(meta.TenantID),
+		Business:   stringpool.Intern(meta.Business),
 		SourceDC:   stringpool.Intern(meta.SourceDC),
 		IngestCity: stringpool.Intern(meta.IngestCity),
 		Metric:     stringpool.Intern(metric),

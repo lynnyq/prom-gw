@@ -421,7 +421,7 @@ func run() error {
 			// 抽取请求级 Meta 用于 headers
 			meta, _ := parser.MetaFromContext(ctx)
 			headers := map[string]string{
-				"tenant":         meta.Tenant,
+				"business":       meta.Business,
 				"source_dc":      meta.SourceDC,
 				"ingest_city":    meta.IngestCity,
 				"ingest_dc":      *sourceDC, // spec 4.3: ingest_dc 标识本条数据由哪城 prom-gw 写入(本机 flag 值,非 meta.SourceDC)
@@ -434,7 +434,7 @@ func run() error {
 			// 每 ruleset 内仍走"relabel→route→sample→…" 单 stage 链。
 			msg := sink.Message{
 				Topic:   defaultTopic,
-				Key:     []byte(meta.Tenant), // Phase 1: 按 tenant 分区
+				Key:     []byte(meta.Business), // Phase 1: 按 business 分区
 				Headers: headers,
 			}
 			return ruleMgr.Process(ctx, samples, raw, msg)
@@ -443,9 +443,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("init receiver: %w", err)
 	}
-	// 启动时把 token 文件里的 per-tenant RateLimit 推给 receiver(plan T5.1),
-	// 后续 SIGHUP 会再次调用 recv.UpdateTenantLimits 热更新
-	recv.UpdateTenantLimits(auth.TenantLimits())
+	// 启动时把 token 文件里的 per-business RateLimit 推给 receiver(plan T5.1),
+	// 后续 SIGHUP 会再次调用 recv.UpdateBusinessLimits 热更新
+	recv.UpdateBusinessLimits(auth.BusinessLimits())
 	safego.Go("receiver", func() {
 		logger.Info("receiver listening", zap.String("addr", *writeAddr))
 		if err := recv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -517,15 +517,15 @@ func run() error {
 	for sig := range sigCh {
 		switch sig {
 		case syscall.SIGHUP:
-			logger.Info("SIGHUP received, reloading tokens + tenant rate limits")
+			logger.Info("SIGHUP received, reloading tokens + business rate limits")
 			if err := auth.Reload(*tokensPath); err != nil {
 				logger.Error("token reload failed", zap.Error(err))
 			} else {
 				logger.Info("tokens reloaded", zap.Int("count", auth.Size()))
-				// plan T5.1: SIGHUP 同时刷新 receiver 的 per-tenant 限流配置
-				recv.UpdateTenantLimits(auth.TenantLimits())
-				logger.Info("tenant rate limits reloaded",
-					zap.Int("tenants", len(auth.TenantLimits())),
+				// plan T5.1: SIGHUP 同时刷新 receiver 的 per-business 限流配置
+				recv.UpdateBusinessLimits(auth.BusinessLimits())
+				logger.Info("business rate limits reloaded",
+					zap.Int("businesses", len(auth.BusinessLimits())),
 				)
 			}
 		case syscall.SIGINT, syscall.SIGTERM:

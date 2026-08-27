@@ -22,8 +22,8 @@ type tokensFile struct {
 }
 
 type tokenEntry struct {
-	Tenant       string `yaml:"tenant"`
-	TenantID     string `yaml:"tenant_id"`
+	Business     string `yaml:"business"`
+	BusinessID   string `yaml:"business_id"`
 	DefaultTopic string `yaml:"default_topic"`
 	RateLimit    int    `yaml:"rate_limit"`
 }
@@ -38,7 +38,7 @@ type LocalTokenAuthenticator struct {
 	path string
 
 	// tokens atomic 持有 map;Reload 整体替换,无锁读
-	tokens atomic.Pointer[map[string]auth.Tenant]
+	tokens atomic.Pointer[map[string]auth.Business]
 }
 
 // NewLocalTokenAuthenticator 加载 path,失败返回 error。
@@ -64,10 +64,10 @@ func (a *LocalTokenAuthenticator) Reload(path string) error {
 	if len(f.Tokens) == 0 {
 		return fmt.Errorf("no tokens in %s", path)
 	}
-	m := make(map[string]auth.Tenant, len(f.Tokens))
+	m := make(map[string]auth.Business, len(f.Tokens))
 	for token, e := range f.Tokens {
-		if e.Tenant == "" {
-			return fmt.Errorf("token %q has empty tenant", token)
+		if e.Business == "" {
+			return fmt.Errorf("token %q has empty business", token)
 		}
 		if e.DefaultTopic == "" {
 			return fmt.Errorf("token %q has empty default_topic", token)
@@ -75,10 +75,10 @@ func (a *LocalTokenAuthenticator) Reload(path string) error {
 		if e.RateLimit <= 0 {
 			return fmt.Errorf("token %q has invalid rate_limit %d", token, e.RateLimit)
 		}
-		m[token] = auth.Tenant{
-			Name:         e.Tenant,
+		m[token] = auth.Business{
+			Name:         e.Business,
 			DefaultTopic: e.DefaultTopic,
-			TenantID:     e.TenantID,
+			BusinessID:   e.BusinessID,
 			RateLimit:    e.RateLimit,
 		}
 	}
@@ -87,20 +87,20 @@ func (a *LocalTokenAuthenticator) Reload(path string) error {
 }
 
 // Verify 查表;ctx 仅用于 cancel 检查(本地实现不调外部,极快)。
-func (a *LocalTokenAuthenticator) Verify(ctx context.Context, token string) (auth.Tenant, error) {
+func (a *LocalTokenAuthenticator) Verify(ctx context.Context, token string) (auth.Business, error) {
 	if err := ctx.Err(); err != nil {
-		return auth.Tenant{}, err
+		return auth.Business{}, err
 	}
 	if token == "" {
-		return auth.Tenant{}, auth.ErrTokenMissing
+		return auth.Business{}, auth.ErrTokenMissing
 	}
 	m := a.tokens.Load()
 	if m == nil {
-		return auth.Tenant{}, auth.ErrTokenInvalid
+		return auth.Business{}, auth.ErrTokenInvalid
 	}
 	t, ok := (*m)[token]
 	if !ok {
-		return auth.Tenant{}, auth.ErrTokenInvalid
+		return auth.Business{}, auth.ErrTokenInvalid
 	}
 	return t, nil
 }
@@ -117,16 +117,16 @@ func (a *LocalTokenAuthenticator) Size() int {
 	return len(*m)
 }
 
-// ListTenants 列出所有已知 tenant(去重)。不返回 token 本身。
+// ListBusinesses 列出所有已知 business(去重)。不返回 token 本身。
 //
-// 用于 admin /v1/tenants endpoint(plan T4.5)。
-func (a *LocalTokenAuthenticator) ListTenants() []auth.Tenant {
+// 用于 admin /v1/businesses endpoint(plan T4.5)。
+func (a *LocalTokenAuthenticator) ListBusinesses() []auth.Business {
 	m := a.tokens.Load()
 	if m == nil {
 		return nil
 	}
 	seen := make(map[string]struct{}, len(*m))
-	out := make([]auth.Tenant, 0, len(*m))
+	out := make([]auth.Business, 0, len(*m))
 	for _, t := range *m {
 		if _, dup := seen[t.Name]; dup {
 			continue
@@ -137,12 +137,12 @@ func (a *LocalTokenAuthenticator) ListTenants() []auth.Tenant {
 	return out
 }
 
-// TenantLimits 返回当前所有 tenant → RateLimit 映射(plan T5.1 per-tenant 限流)。
+// BusinessLimits 返回当前所有 business → RateLimit 映射(plan T5.1 per-business 限流)。
 //
-// 用于 receiver.UpdateTenantLimits 在 SIGHUP 时刷新 per-tenant 限流配置;
+// 用于 receiver.UpdateBusinessLimits 在 SIGHUP 时刷新 per-business 限流配置;
 // 该映射只关心 name + rate_limit,其他字段丢弃。
-// 重复 tenant 时按 token key 字典序取首个,行为确定(避免 Go map 随机迭代顺序导致的热重载结果抖动)。
-func (a *LocalTokenAuthenticator) TenantLimits() map[string]int {
+// 重复 business 时按 token key 字典序取首个,行为确定(避免 Go map 随机迭代顺序导致的热重载结果抖动)。
+func (a *LocalTokenAuthenticator) BusinessLimits() map[string]int {
 	m := a.tokens.Load()
 	if m == nil {
 		return nil

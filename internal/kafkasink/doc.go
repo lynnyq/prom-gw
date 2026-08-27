@@ -6,7 +6,7 @@
 //   - 真正的错误通过 gateway_produce_errors_total{reason} 指标反馈(也可选 callback)
 //   - 同步等待用 Flush(timeout),仅在停机 + WAL drain 场景使用
 //   - Channel 满且超过 produce_block_timeout 默认 100ms → ErrProduceBackpressure(receiver 映射 503)
-//   - Headers map 透传(traceparent / tenant / source_dc / ingest_ts 等)
+//   - Headers map 透传(traceparent / business / source_dc / ingest_ts 等)
 //   - 启动参数:linger=50ms / batch=1MB / acks=all / 压缩=zstd / 幂等=true
 //
 // # 启动行为

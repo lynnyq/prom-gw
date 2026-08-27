@@ -33,7 +33,7 @@ func TestLoadFile_AppBusinessYAML(t *testing.T) {
 	require.Len(t, cfg.Rulesets, 1, "应解析出 1 个 ruleset")
 	rs := cfg.Rulesets[0]
 	assert.Equal(t, "app-business", rs.Name)
-	assert.Equal(t, "app-business", rs.Tenant)
+	assert.Equal(t, "app-business", rs.Business)
 	assert.Equal(t, "", rs.SourceTopic, "input_topic 已废弃,应为空")
 	assert.Equal(t, "prom.bj.routed.app_business", rs.DefaultTopic)
 	assert.Equal(t, int64(1), rs.Version)

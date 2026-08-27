@@ -309,7 +309,6 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
         Map<String, Object> m = new LinkedHashMap<>(16);
         m.put("ts", tsFmt.format(r.getTs()));
         m.put("metric", r.getMetric());
-        m.put("tenant", r.getTenant());
         m.put("business", r.getBusiness());
         m.put("ingest_city", r.getIngestCity());
         m.put("source_dc", r.getSourceDc());
@@ -322,7 +321,6 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
         m.put("value_avg", r.getValueAvg());
         m.put("value_p50", r.getValueP50());
         m.put("value_p99", r.getValueP99());
-        m.put("ingest_time", tsFmt.format(r.getIngestTime()));
         return mapper.writeValueAsString(m);
     }
 }

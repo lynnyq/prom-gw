@@ -363,7 +363,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 		Payload: []byte{0xde, 0xad, 0xbe, 0xef},
 		Headers: map[string]string{
 			"trace_id": "abc-123",
-			"tenant":   "acme",
+			"business":   "acme",
 		},
 		Time: time.Unix(0, 1700000000000000000),
 	}
@@ -377,7 +377,7 @@ func TestEncodeDecode_RoundTrip(t *testing.T) {
 	assert.True(t, bytes.Equal(rec.Key, dec.Key))
 	assert.True(t, bytes.Equal(rec.Payload, dec.Payload))
 	assert.Equal(t, rec.Headers["trace_id"], dec.Headers["trace_id"])
-	assert.Equal(t, rec.Headers["tenant"], dec.Headers["tenant"])
+	assert.Equal(t, rec.Headers["business"], dec.Headers["business"])
 	assert.Equal(t, rec.Time.UnixNano(), dec.Time.UnixNano())
 }
 

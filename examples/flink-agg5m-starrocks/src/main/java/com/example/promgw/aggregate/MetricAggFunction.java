@@ -7,7 +7,7 @@ import org.apache.flink.api.common.functions.AggregateFunction;
 /**
  * MetricAggFunction 5min 窗口聚合函数。
  *
- * 聚合维度:同一 series(tenant + metric + sorted labels)在 5min 窗口内的所有 sample
+ * 聚合维度:同一 series(business + metric + sorted labels)在 5min 窗口内的所有 sample
  * 聚合输出:sample_count / sum / max / min / avg / p50 / p99
  *
  * p50/p99 用桶内排序精确计算(与 prom-gw downsample stage 对齐)。
@@ -29,15 +29,12 @@ public class MetricAggFunction implements AggregateFunction<SampleWithMeta, Metr
         acc.samples.add(rec.getValue());
 
         // 元数据从第一条 sample 取(同 series 后续应一致)
-        if (acc.tenant == null) {
-            acc.tenant = rec.getTenant();
+        if (acc.business == null) {
+            acc.business = rec.getBusiness();
             acc.metric = rec.getMetric();
             acc.labels = rec.getLabels();
             acc.sourceDc = rec.getSourceDc();
             acc.ingestCity = rec.getIngestCity();
-            acc.ingestDc = rec.getIngestDc();
-            acc.ingestTimeMs = rec.getIngestTimeMs();
-            acc.traceparent = rec.getTraceparent();
         }
         return acc;
     }
@@ -58,15 +55,12 @@ public class MetricAggFunction implements AggregateFunction<SampleWithMeta, Metr
         if (b.max > a.max) a.max = b.max;
         if (b.min < a.min) a.min = b.min;
         a.samples.addAll(b.samples);
-        if (a.tenant == null) {
-            a.tenant = b.tenant;
+        if (a.business == null) {
+            a.business = b.business;
             a.metric = b.metric;
             a.labels = b.labels;
             a.sourceDc = b.sourceDc;
             a.ingestCity = b.ingestCity;
-            a.ingestDc = b.ingestDc;
-            a.ingestTimeMs = b.ingestTimeMs;
-            a.traceparent = b.traceparent;
         }
         return a;
     }

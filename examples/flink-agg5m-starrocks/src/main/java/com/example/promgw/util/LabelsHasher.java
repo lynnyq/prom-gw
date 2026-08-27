@@ -6,14 +6,13 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- * LabelsHasher 计算 labels 的 hash,用作 StarRocks sr_bj_metrics_5m 表主键之一(labels_hash)。
+ * LabelsHasher 计算 labels 的 hash,用作 StarRocks metrics_5m 表主键之一(labels_hash)。
  *
  * 实现:按 label name 排序后拼接,计算 SHA-1,取前 16 个 hex 字符(64 位)。
  * 用 Java 内置 MessageDigest,无需额外依赖。
  *
- * 说明:prom-gw 端文档建议用 XXH3(更快),但 Java 侧无标准 XXH3 库,
+ * 说明:prom-gw 端文档建议用 SHA-1,Java 侧用 JDK 内置 MessageDigest 实现,
  * SHA-1 碰撞率足够低(< 2^-60),且所有 JDK 内置,部署简单。
- * 如需与 prom-gw 端完全对齐,可引入 net.openhft:zero-allocation-hash。
  */
 public final class LabelsHasher {
 
@@ -49,12 +48,12 @@ public final class LabelsHasher {
     }
 
     /**
-     * seriesKey 计算 series 的分组 key(tenant + metric + sorted labels)。
+     * seriesKey 计算 series 的分组 key(business + metric + sorted labels)。
      * 用于 Flink keyBy,保证同 series 落同 subtask。
      */
-    public static String seriesKey(String tenant, String metric, Map<String, String> labels) {
+    public static String seriesKey(String business, String metric, Map<String, String> labels) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append(tenant).append('/').append(metric).append('/');
+        sb.append(business).append('/').append(metric).append('/');
         if (labels != null) {
             TreeMap<String, String> sorted = new TreeMap<>(labels);
             for (Map.Entry<String, String> e : sorted.entrySet()) {

@@ -8,7 +8,7 @@ import (
 
 func TestSample_SeriesKey_Deterministic(t *testing.T) {
 	a := Sample{
-		Tenant: "app-business",
+		Business: "app-business",
 		Metric: "http_requests_total",
 		Labels: []Label{
 			{Name: "method", Value: "GET"},
@@ -16,7 +16,7 @@ func TestSample_SeriesKey_Deterministic(t *testing.T) {
 		},
 	}
 	b := Sample{
-		Tenant: "app-business",
+		Business: "app-business",
 		Metric: "http_requests_total",
 		Labels: []Label{
 			{Name: "method", Value: "GET"},
@@ -28,7 +28,7 @@ func TestSample_SeriesKey_Deterministic(t *testing.T) {
 
 func TestSample_SeriesKey_OrderIndependent(t *testing.T) {
 	a := Sample{
-		Tenant: "app-business",
+		Business: "app-business",
 		Metric: "http_requests_total",
 		Labels: []Label{
 			{Name: "method", Value: "GET"},
@@ -36,7 +36,7 @@ func TestSample_SeriesKey_OrderIndependent(t *testing.T) {
 		},
 	}
 	b := Sample{
-		Tenant: "app-business",
+		Business: "app-business",
 		Metric: "http_requests_total",
 		Labels: []Label{
 			{Name: "status", Value: "200"},
@@ -51,11 +51,11 @@ func TestSample_SeriesKey_OrderIndependent(t *testing.T) {
 
 func TestSample_SeriesKey_NoCollision(t *testing.T) {
 	a := Sample{
-		Tenant: "t", Metric: "m",
+		Business: "t", Metric: "m",
 		Labels: []Label{{Name: "x", Value: "ab"}},
 	}
 	b := Sample{
-		Tenant: "t", Metric: "m",
+		Business: "t", Metric: "m",
 		Labels: []Label{{Name: "xa", Value: "b"}},
 	}
 	assert.NotEqual(t, a.SeriesKey(), b.SeriesKey(),
@@ -64,7 +64,7 @@ func TestSample_SeriesKey_NoCollision(t *testing.T) {
 
 func TestSample_Clone(t *testing.T) {
 	s := Sample{
-		Tenant: "t", Metric: "m",
+		Business: "t", Metric: "m",
 		Labels: []Label{{Name: "k", Value: "v"}},
 		Value: 1.5, Timestamp: 100,
 	}
@@ -77,19 +77,19 @@ func TestSample_Clone(t *testing.T) {
 
 func TestSample_InternStrings(t *testing.T) {
 	s := Sample{
-		Tenant: "tenant-a", TenantID: "1001", SourceDC: "dc-1",
+		Business: "tenant-a", SourceDC: "dc-1",
 		Metric: "up",
 		Labels: []Label{{Name: "instance", Value: "10.0.0.1:8080"}},
 	}
 	s.InternStrings()
 	// 多次 intern 同字符串应返回同一 string 值(底层可能复用字节)
 	again := Sample{
-		Tenant: "tenant-a", TenantID: "1001", SourceDC: "dc-1",
+		Business: "tenant-a", SourceDC: "dc-1",
 		Metric: "up",
 		Labels: []Label{{Name: "instance", Value: "10.0.0.2:8080"}},
 	}
 	again.InternStrings()
-	assert.Equal(t, s.Tenant, again.Tenant, "tenant string should be shared")
+	assert.Equal(t, s.Business, again.Business, "business string should be shared")
 	assert.Equal(t, s.Metric, again.Metric)
 	assert.Equal(t, s.Labels[0].Name, again.Labels[0].Name)
 }

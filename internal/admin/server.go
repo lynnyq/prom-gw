@@ -11,7 +11,7 @@
 //     POST   /v1/rulesets/{name}:reload
 //     POST   /v1/rulesets/{name}:rollback?to_version=N
 //     GET    /v1/rulesets/{name}/history
-//     GET    /v1/tenants
+//     GET    /v1/businesses
 //     GET    /v1/stats
 //   - 业务能力委托给 Service 接口(便于 mock 测试)
 package admin
@@ -57,8 +57,8 @@ type Service interface {
 	RollbackRuleSet(ctx context.Context, name string, toVersion int64) error
 	// ListHistory 列历史(从新到旧)。
 	ListHistory(ctx context.Context, name string) []config.HistoryRecord
-	// ListTenants 列当前 token → tenant 映射(仅元数据,不返回明文 token)。
-	ListTenants(ctx context.Context) []TenantInfo
+	// ListBusinesses 列当前 token → business 映射(仅元数据,不返回明文 token)。
+	ListBusinesses(ctx context.Context) []BusinessInfo
 	// Stats 运行时统计(per ruleset QPS/drop rate 等)。
 	Stats(ctx context.Context) StatsResp
 }
@@ -81,10 +81,10 @@ type RuleSetDetail struct {
 	Source      string `json:"source"`
 }
 
-// TenantInfo tenant 元数据(不含 token)。
-type TenantInfo struct {
-	Tenant       string `json:"tenant"`
-	TenantID     string `json:"tenant_id,omitempty"`
+// BusinessInfo business 元数据(不含 token)。
+type BusinessInfo struct {
+	Business     string `json:"business"`
+	BusinessID   string `json:"business_id,omitempty"`
 	DefaultTopic string `json:"default_topic"`
 	RateLimit    int    `json:"rate_limit"`
 }
@@ -266,7 +266,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/rulesets", s.handleRulesets)
 	mux.HandleFunc("/v1/rulesets/", s.handleRulesetSub)
-	mux.HandleFunc("/v1/tenants", s.handleTenants)
+	mux.HandleFunc("/v1/businesses", s.handleBusinesses)
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	return mux
 }
@@ -398,12 +398,12 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request, name stri
 	httpx.Write(w, r, map[string]any{"history": s.service.ListHistory(r.Context(), name)})
 }
 
-func (s *Server) handleTenants(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleBusinesses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpx.WriteErr(w, r, httpx.CodeMethodNotAllowed, MsgBadRequest)
 		return
 	}
-	httpx.Write(w, r, map[string]any{"tenants": s.service.ListTenants(r.Context())})
+	httpx.Write(w, r, map[string]any{"businesses": s.service.ListBusinesses(r.Context())})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

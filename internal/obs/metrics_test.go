@@ -71,13 +71,13 @@ func TestMetrics_AllRegistered(t *testing.T) {
 }
 
 func TestSamplesTotal_CounterVec(t *testing.T) {
-	before := getCounterValue(t, "gateway_samples_total", "stage", "x_test", "tenant", "x_t", "status", "ok")
+	before := getCounterValue(t, "gateway_samples_total", "stage", "x_test", "business", "x_t", "status", "ok")
 
 	SamplesTotal.WithLabelValues("x_test", "x_t", "ok", "test_city", "test_dc").Inc()
 	SamplesTotal.WithLabelValues("x_test", "x_t", "ok", "test_city", "test_dc").Inc()
 	SamplesTotal.WithLabelValues("x_test", "x_t", "ok", "test_city", "test_dc").Inc()
 
-	after := getCounterValue(t, "gateway_samples_total", "stage", "x_test", "tenant", "x_t", "status", "ok")
+	after := getCounterValue(t, "gateway_samples_total", "stage", "x_test", "business", "x_t", "status", "ok")
 	assert.Equal(t, before+3, after, "Inc 3 次应增加 3")
 }
 

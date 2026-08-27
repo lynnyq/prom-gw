@@ -194,9 +194,9 @@ func (p *Pipeline) Process(ctx context.Context, samples []parser.Sample, raw []b
 	}
 
 	// 2. 按 TargetTopic 分发(同一 batch 可能有多个 topic → 多次 out)
-	tenant := rs.RuleSet.Tenant
-	if tenant == "" {
-		tenant = "unknown"
+	business := rs.RuleSet.Business
+	if business == "" {
+		business = "unknown"
 	}
 	defaultTopic := rs.RuleSet.DefaultTopic
 	if defaultTopic == "" {
@@ -206,9 +206,9 @@ func (p *Pipeline) Process(ctx context.Context, samples []parser.Sample, raw []b
 	// 统计:总 in / 路由后 / 丢弃
 	nIn := int64(len(samples))
 	nOut := int64(len(cur))
-	obs.SamplesTotal.WithLabelValues("rule", tenant, "in", ingestCity, sourceDC).Add(float64(nIn))
-	obs.SamplesTotal.WithLabelValues("rule", tenant, "drop", ingestCity, sourceDC).Add(float64(totalDropped))
-	obs.SamplesTotal.WithLabelValues("rule", tenant, "out", ingestCity, sourceDC).Add(float64(nOut))
+	obs.SamplesTotal.WithLabelValues("rule", business, "in", ingestCity, sourceDC).Add(float64(nIn))
+	obs.SamplesTotal.WithLabelValues("rule", business, "drop", ingestCity, sourceDC).Add(float64(totalDropped))
+	obs.SamplesTotal.WithLabelValues("rule", business, "out", ingestCity, sourceDC).Add(float64(nOut))
 
 	if len(cur) == 0 {
 		// 整批被采样/路由丢空,直接返回成功(不投递)
@@ -233,12 +233,12 @@ func (p *Pipeline) Process(ctx context.Context, samples []parser.Sample, raw []b
 		m.Payload = raw
 		if err := p.out(ctx, m); err != nil {
 			obs.ErrorsTotal.WithLabelValues("rule", "send", ingestCity, sourceDC).Inc()
-			obs.SamplesTotal.WithLabelValues("rule", tenant, "error", ingestCity, sourceDC).Add(float64(nOut))
+			obs.SamplesTotal.WithLabelValues("rule", business, "error", ingestCity, sourceDC).Add(float64(nOut))
 			obs.StageDuration.WithLabelValues("rule", "error", ingestCity).Observe(time.Since(start).Seconds())
 			span.RecordError(err)
 			return err
 		}
-		obs.SamplesTotal.WithLabelValues("rule", tenant, "ok", ingestCity, sourceDC).Add(1)
+		obs.SamplesTotal.WithLabelValues("rule", business, "ok", ingestCity, sourceDC).Add(1)
 	}
 
 	obs.StageDuration.WithLabelValues("rule", "ok", ingestCity).Observe(time.Since(start).Seconds())

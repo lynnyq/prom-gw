@@ -5,7 +5,7 @@
 //   RequestID -> RealIP -> Recoverer -> RateLimit -> Auth -> handler
 //
 // 端口固定 :19201(见 plan T1.4 端口分配表)。
-// Auth 注入的 Tenant 走 ctx.Meta,parser/kafkasink 通过 ctx 读取。
+// Auth 注入的 Business 走 ctx.Meta,parser/kafkasink 通过 ctx 读取。
 package receiver
 
 import (
@@ -50,7 +50,7 @@ type Config struct {
 	GlobalRateLimit int
 	// Handler 业务处理函数(由 main.go 注入,通常为 pipeline.Submit 入口)
 	// 参数:
-	//   - ctx: 含 Meta(tenant / source_dc / remote_ip / ingest_ts / ingest_city)
+	//   - ctx: 含 Meta(business / source_dc / remote_ip / ingest_ts / ingest_city)
 	//   - raw: 原始 prompb.WriteRequest 字节(T1.10 集成测试要求字节级相等)
 	//   - samples: parser 解析后的 samples
 	//   - defaultTopic: 该 token 关联的兜底 topic
@@ -70,7 +70,7 @@ type Server struct {
 	cfg     Config
 	limiter *rate.Limiter
 	http    *http.Server
-	// rlCfg per-tenant 限流配置(T5.1);init 时给 defaultRPS 一个兜底
+	// rlCfg per-business 限流配置(T5.1);init 时给 defaultRPS 一个兜底
 	rlCfg rateLimitConfig
 }
 
@@ -128,7 +128,7 @@ func (s *Server) routes() http.Handler {
 
 // middleware 串联通用中间件。
 func (s *Server) middleware(next http.Handler) http.Handler {
-	return s.recovererMW(s.requestIDMW(s.realIPMW(s.rateLimitMW(s.authMW(s.tenantRateLimitMW(next))))))
+	return s.recovererMW(s.requestIDMW(s.realIPMW(s.rateLimitMW(s.authMW(s.businessRateLimitMW(next))))))
 }
 
 func (s *Server) requestIDMW(next http.Handler) http.Handler {
@@ -182,7 +182,7 @@ func (s *Server) rateLimitMW(next http.Handler) http.Handler {
 func (s *Server) authMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := extractBearer(r.Header.Get("Authorization"))
-		tenant, err := s.cfg.Authenticator.Verify(r.Context(), token)
+		business, err := s.cfg.Authenticator.Verify(r.Context(), token)
 		if err != nil {
 			reason := classifyAuthError(err)
 			obs.AuthFailTotal.WithLabelValues(reason, s.cfg.IngestCity, s.cfg.SourceDC).Inc()
@@ -197,7 +197,7 @@ func (s *Server) authMW(next http.Handler) http.Handler {
 			writeJSON(w, status, errorBody(4001, "auth failed: "+reason))
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxKeyTenant{}, tenant)
+		ctx := context.WithValue(r.Context(), ctxKeyBusiness{}, business)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -252,7 +252,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, errorBody(4006, "body read: "+err.Error()))
 		return
 	}
-	obs.BytesIn.WithLabelValues(tenantName(r.Context()), ingestCity, sourceDC).Add(float64(len(body)))
+	obs.BytesIn.WithLabelValues(businessName(r.Context()), ingestCity, sourceDC).Add(float64(len(body)))
 	span.SetAttributes(attribute.Int("http.body_bytes", len(body)))
 
 	// 3. decode
@@ -277,11 +277,10 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	obs.StageDuration.WithLabelValues("decode", "ok", ingestCity).Observe(time.Since(start).Seconds())
 
 	// 4. 注入 Meta 到 ctx
-	tenant := tenantFromCtx(r.Context())
+	business := businessFromCtx(r.Context())
 	remoteIP, _ := r.Context().Value(ctxKeyRemoteIP{}).(string)
 	meta := parser.Meta{
-		Tenant:     tenant.Name,
-		TenantID:   tenant.TenantID,
+		Business:   business.Name,
 		SourceDC:   sourceDC,
 		RemoteIP:   remoteIP,
 		IngestTs:   time.Now().UnixNano(),
@@ -290,7 +289,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx = parser.ContextWithMeta(ctx, meta)
 	span.SetAttributes(
-		attribute.String("tenant", meta.Tenant),
+		attribute.String("business", meta.Business),
 		attribute.String("trace_id", meta.TraceID),
 	)
 
@@ -318,11 +317,11 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 		obs.ErrorsTotal.WithLabelValues("parse", "parse_series", ingestCity, sourceDC).Add(float64(res.ParseError))
 	}
 	obs.StageDuration.WithLabelValues("parse", "ok", ingestCity).Observe(time.Since(start).Seconds())
-	obs.SamplesTotal.WithLabelValues("parse", meta.Tenant, "ok", ingestCity, sourceDC).Add(float64(len(res.Samples)))
+	obs.SamplesTotal.WithLabelValues("parse", meta.Business, "ok", ingestCity, sourceDC).Add(float64(len(res.Samples)))
 
 	// 6. handler(由 main 注入: 通常是 rule engine + pipeline.Submit)
 	if s.cfg.Handler != nil {
-		if err := s.cfg.Handler(ctx, body, res.Samples, tenant.DefaultTopic); err != nil {
+		if err := s.cfg.Handler(ctx, body, res.Samples, business.DefaultTopic); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			obs.ErrorsTotal.WithLabelValues("sink", "handler_error", ingestCity, sourceDC).Inc()
@@ -341,18 +340,18 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 type ctxKeyRequestID struct{}
 type ctxKeyRemoteIP struct{}
-type ctxKeyTenant struct{}
+type ctxKeyBusiness struct{}
 
-func tenantName(ctx context.Context) string {
-	t, _ := ctx.Value(ctxKeyTenant{}).(auth.Tenant)
+func businessName(ctx context.Context) string {
+	t, _ := ctx.Value(ctxKeyBusiness{}).(auth.Business)
 	if t.Name == "" {
 		return "unknown"
 	}
 	return t.Name
 }
 
-func tenantFromCtx(ctx context.Context) auth.Tenant {
-	t, _ := ctx.Value(ctxKeyTenant{}).(auth.Tenant)
+func businessFromCtx(ctx context.Context) auth.Business {
+	t, _ := ctx.Value(ctxKeyBusiness{}).(auth.Business)
 	return t
 }
 

@@ -12,7 +12,7 @@
 # ----------------------------------------------------------------------------
 rulesets:
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.local.routed.app_business
     version: 1
     match:

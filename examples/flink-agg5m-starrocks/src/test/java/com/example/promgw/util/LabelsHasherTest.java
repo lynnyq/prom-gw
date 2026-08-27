@@ -67,18 +67,18 @@ class LabelsHasherTest {
         labels2.put("job", "prom");
 
         // 同 labels 不同顺序,seriesKey 应一致
-        String k1 = LabelsHasher.seriesKey("tenant1", "up", labels1);
-        String k2 = LabelsHasher.seriesKey("tenant1", "up", labels2);
+        String k1 = LabelsHasher.seriesKey("biz1", "up", labels1);
+        String k2 = LabelsHasher.seriesKey("biz1", "up", labels2);
         assertThat(k1).isEqualTo(k2);
     }
 
     @Test
-    void testSeriesKeyDifferentTenant() {
+    void testSeriesKeyDifferentBusiness() {
         Map<String, String> labels = new HashMap<>();
         labels.put("job", "prom");
 
-        String k1 = LabelsHasher.seriesKey("tenant1", "up", labels);
-        String k2 = LabelsHasher.seriesKey("tenant2", "up", labels);
+        String k1 = LabelsHasher.seriesKey("biz1", "up", labels);
+        String k2 = LabelsHasher.seriesKey("biz2", "up", labels);
         assertThat(k1).isNotEqualTo(k2);
     }
 }

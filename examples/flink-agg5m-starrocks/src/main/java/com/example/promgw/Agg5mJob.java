@@ -109,7 +109,7 @@ public class Agg5mJob {
 
         // 7. keyBy(seriesKey) + 5min 窗口聚合
         DataStream<AggResult> aggStream = withWatermark
-                .keyBy(rec -> LabelsHasher.seriesKey(rec.getTenant(), rec.getMetric(), rec.getLabels()))
+                .keyBy(rec -> LabelsHasher.seriesKey(rec.getBusiness(), rec.getMetric(), rec.getLabels()))
                 .window(TumblingEventTimeWindows.of(Time.minutes(cfg.windowMinutes)))
                 .aggregate(new MetricAggFunction(), new AggWindowFunction())
                 .name("agg-" + cfg.windowMinutes + "min")

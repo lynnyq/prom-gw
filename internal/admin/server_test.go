@@ -8,7 +8,7 @@
 //   - POST /v1/rulesets/{name}:reload
 //   - POST /v1/rulesets/{name}:rollback?to_version=N
 //   - GET /v1/rulesets/{name}/history
-//   - /v1/tenants /v1/stats
+//   - /v1/businesses /v1/stats
 //   - IP 白名单拒绝
 //   - 404 / 400 / 405
 package admin
@@ -40,15 +40,15 @@ type mockService struct {
 	ruleSets    map[string]config.HistoryRecord
 	reloadCount atomic.Int32
 	rollbackTo  int64
-	tenants     []auth.Tenant
+	businesses  []auth.Business
 }
 
 func newMockService() *mockService {
 	return &mockService{
 		ruleSets: make(map[string]config.HistoryRecord),
-		tenants: []auth.Tenant{
-			{Name: "app-business", TenantID: "1001", DefaultTopic: "prom.routed.app_business", RateLimit: 80000},
-			{Name: "infra", TenantID: "1002", DefaultTopic: "prom.routed.infra", RateLimit: 50000},
+		businesses: []auth.Business{
+			{Name: "app-business", BusinessID: "1001", DefaultTopic: "prom.routed.app_business", RateLimit: 80000},
+			{Name: "infra", BusinessID: "1002", DefaultTopic: "prom.routed.infra", RateLimit: 50000},
 		},
 	}
 }
@@ -158,11 +158,11 @@ func (m *mockService) ListHistory(_ context.Context, name string) []config.Histo
 	return []config.HistoryRecord{r}
 }
 
-func (m *mockService) ListTenants(_ context.Context) []TenantInfo {
-	out := make([]TenantInfo, len(m.tenants))
-	for i, t := range m.tenants {
-		out[i] = TenantInfo{
-			Tenant: t.Name, TenantID: t.TenantID,
+func (m *mockService) ListBusinesses(_ context.Context) []BusinessInfo {
+	out := make([]BusinessInfo, len(m.businesses))
+	for i, t := range m.businesses {
+		out[i] = BusinessInfo{
+			Business: t.Name, BusinessID: t.BusinessID,
 			DefaultTopic: t.DefaultTopic, RateLimit: t.RateLimit,
 		}
 	}
@@ -377,9 +377,9 @@ func TestServer_History(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), `"history"`)
 }
 
-func TestServer_Tenants(t *testing.T) {
+func TestServer_Businesses(t *testing.T) {
 	s := newTestServer(t, newMockService())
-	rr := doRequest(t, s, http.MethodGet, "/v1/tenants", nil)
+	rr := doRequest(t, s, http.MethodGet, "/v1/businesses", nil)
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.Contains(t, rr.Body.String(), "app-business")
 }

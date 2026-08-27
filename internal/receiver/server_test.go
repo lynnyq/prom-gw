@@ -21,23 +21,23 @@ import (
 
 // stubAuth 测试用 Authenticator。
 type stubAuth struct {
-	tokens map[string]auth.Tenant
+	tokens map[string]auth.Business
 }
 
-func (s *stubAuth) Verify(_ context.Context, token string) (auth.Tenant, error) {
+func (s *stubAuth) Verify(_ context.Context, token string) (auth.Business, error) {
 	if token == "" {
-		return auth.Tenant{}, auth.ErrTokenMissing
+		return auth.Business{}, auth.ErrTokenMissing
 	}
 	t, ok := s.tokens[token]
 	if !ok {
-		return auth.Tenant{}, auth.ErrTokenInvalid
+		return auth.Business{}, auth.ErrTokenInvalid
 	}
 	return t, nil
 }
 
 func newTestServer(t *testing.T, h func(context.Context, []byte, []parser.Sample, string) error) *Server {
 	t.Helper()
-	a := &stubAuth{tokens: map[string]auth.Tenant{
+	a := &stubAuth{tokens: map[string]auth.Business{
 		"good": {Name: "t1", DefaultTopic: "prom.routed.t1", RateLimit: 100000},
 	}}
 	s, err := New(Config{

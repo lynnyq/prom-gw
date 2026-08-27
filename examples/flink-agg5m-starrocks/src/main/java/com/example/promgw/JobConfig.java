@@ -34,7 +34,7 @@ public class JobConfig {
     public String srHost = "localhost";
     public int srPort = 8030;
     public String srDb = "prom";
-    public String srTable = "sr_bj_metrics_5m";
+    public String srTable = "metrics_5m";
     public String srUser = "root";
     public String srPassword = "";
     public boolean srGzip = true;

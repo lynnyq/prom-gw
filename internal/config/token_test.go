@@ -14,13 +14,13 @@ import (
 const validYAML = `
 tokens:
   "tk_test_a":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.routed.app_business
     rate_limit: 80000
   "tk_test_b":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.routed.infra
     rate_limit: 50000
 `
@@ -44,12 +44,12 @@ func TestVerify_HappyPath(t *testing.T) {
 	path := writeTempTokens(t, validYAML)
 	a, _ := NewLocalTokenAuthenticator(path)
 
-	tenant, err := a.Verify(context.Background(), "tk_test_a")
+	business, err := a.Verify(context.Background(), "tk_test_a")
 	require.NoError(t, err)
-	assert.Equal(t, "app-business", tenant.Name)
-	assert.Equal(t, "1001", tenant.TenantID)
-	assert.Equal(t, "prom.routed.app_business", tenant.DefaultTopic)
-	assert.Equal(t, 80000, tenant.RateLimit)
+	assert.Equal(t, "app-business", business.Name)
+	assert.Equal(t, "1001", business.BusinessID)
+	assert.Equal(t, "prom.routed.app_business", business.DefaultTopic)
+	assert.Equal(t, 80000, business.RateLimit)
 }
 
 func TestVerify_EmptyToken(t *testing.T) {
@@ -81,7 +81,7 @@ func TestReload_ReplacesTokens(t *testing.T) {
 	updated := `
 tokens:
   "tk_test_c":
-    tenant: app-new
+    business: app-new
     default_topic: prom.routed.app_new
     rate_limit: 1000
 `
@@ -94,9 +94,9 @@ tokens:
 	assert.ErrorIs(t, err, auth.ErrTokenInvalid)
 
 	// 新 token 生效
-	tenant, err := a.Verify(context.Background(), "tk_test_c")
+	business, err := a.Verify(context.Background(), "tk_test_c")
 	require.NoError(t, err)
-	assert.Equal(t, "app-new", tenant.Name)
+	assert.Equal(t, "app-new", business.Name)
 }
 
 func TestNew_InvalidYAML(t *testing.T) {
@@ -114,7 +114,7 @@ func TestNew_InvalidRateLimit(t *testing.T) {
 	bad := `
 tokens:
   "tk_x":
-    tenant: t
+    business: t
     default_topic: p
     rate_limit: 0
 `
@@ -122,52 +122,52 @@ tokens:
 	assert.Error(t, err, "rate_limit <= 0 should be rejected")
 }
 
-func TestTenantLimits_ReturnsAllTenants(t *testing.T) {
+func TestBusinessLimits_ReturnsAllBusinesses(t *testing.T) {
 	a, _ := NewLocalTokenAuthenticator(writeTempTokens(t, validYAML))
-	limits := a.TenantLimits()
+	limits := a.BusinessLimits()
 	require.Len(t, limits, 2)
 	assert.Equal(t, 80000, limits["app-business"])
 	assert.Equal(t, 50000, limits["infra"])
 }
 
-func TestTenantLimits_DeduplicatesTenant(t *testing.T) {
+func TestBusinessLimits_DeduplicatesBusiness(t *testing.T) {
 	yaml := `
 tokens:
   "tk_a1":
-    tenant: app
+    business: app
     default_topic: prom.routed.app
     rate_limit: 100
   "tk_a2":
-    tenant: app
+    business: app
     default_topic: prom.routed.app
     rate_limit: 200
 `
 	a, _ := NewLocalTokenAuthenticator(writeTempTokens(t, yaml))
-	limits := a.TenantLimits()
-	// 同一 tenant 多 token 时取 token key 字典序首个,后续不覆盖
+	limits := a.BusinessLimits()
+	// 同一 business 多 token 时取 token key 字典序首个,后续不覆盖
 	assert.Equal(t, 100, limits["app"])
 }
 
-func TestTenantLimits_DeterministicOrder(t *testing.T) {
+func TestBusinessLimits_DeterministicOrder(t *testing.T) {
 	// 即便 yaml 顺序不同 / 多次调用,结果必须一致(token key 字典序首个获胜)
 	yaml := `
 tokens:
   "tk_zzz":
-    tenant: app
+    business: app
     default_topic: prom.routed.app
     rate_limit: 999
   "tk_aaa":
-    tenant: app
+    business: app
     default_topic: prom.routed.app
     rate_limit: 50
   "tk_mmm":
-    tenant: other
+    business: other
     default_topic: prom.routed.other
     rate_limit: 300
 `
 	a, _ := NewLocalTokenAuthenticator(writeTempTokens(t, yaml))
 	for i := 0; i < 50; i++ {
-		limits := a.TenantLimits()
+		limits := a.BusinessLimits()
 		assert.Equal(t, 50, limits["app"], "iteration %d", i)
 		assert.Equal(t, 300, limits["other"], "iteration %d", i)
 	}

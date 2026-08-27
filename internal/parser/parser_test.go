@@ -12,8 +12,7 @@ import (
 func ctxWithMeta(t *testing.T) context.Context {
 	t.Helper()
 	return ContextWithMeta(context.Background(), Meta{
-		Tenant:     "app-business",
-		TenantID:   "1001",
+		Business:   "app-business",
 		SourceDC:   "dc-1",
 		IngestCity: "bj",
 		IngestTs:   1000000,
@@ -38,7 +37,7 @@ func TestParse_HappyPath(t *testing.T) {
 	require.Len(t, res.Samples, 1)
 
 	s := res.Samples[0]
-	assert.Equal(t, "app-business", s.Tenant)
+	assert.Equal(t, "app-business", s.Business)
 	assert.Equal(t, "dc-1", s.SourceDC)
 	assert.Equal(t, "bj", s.IngestCity)
 	assert.Equal(t, "http_requests_total", s.Metric)
@@ -135,7 +134,7 @@ func TestParse_SeriesKeyStableAcrossOrders(t *testing.T) {
 }
 
 func TestContextWithMeta_RoundTrip(t *testing.T) {
-	m := Meta{Tenant: "t1", TenantID: "2001", SourceDC: "dc-x", IngestCity: "bj", RemoteIP: "1.2.3.4", TraceID: "trace-abc"}
+	m := Meta{Business: "t1", SourceDC: "dc-x", IngestCity: "bj", RemoteIP: "1.2.3.4", TraceID: "trace-abc"}
 	ctx := ContextWithMeta(context.Background(), m)
 	got, ok := MetaFromContext(ctx)
 	require.True(t, ok)

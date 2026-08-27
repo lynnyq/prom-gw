@@ -87,18 +87,18 @@ func InitMetricsForTest() {
 // 全局指标(进程级单例)。
 // 命名规范: gateway_<scope>_<name>_<unit>(可选)
 // label 规范:
-//   - stage / tenant / status / type / reason
+//   - stage / business / status / type / reason
 //   - ingest_city / source_dc(spec 7.1:所有指标必带,便于北京 Grafana 跨城聚合/切片)
 var (
 	// SamplesTotal 按阶段计 samples 处理量。
 	// stage ∈ {receive, decode, parse, pipeline, kafka, wal}
-	// tenant 来源 token;空表示未鉴权
+	// business 来源 token;空表示未鉴权
 	// status ∈ {ok, error, drop}
 	// ingest_city / source_dc 标识数据来源(便于跨城聚合/切片)
 	SamplesTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_samples_total",
-		Help: "Total number of samples processed, by stage/tenant/status/ingest_city/source_dc.",
-	}, []string{"stage", "tenant", "status", "ingest_city", "source_dc"})
+		Help: "Total number of samples processed, by stage/business/status/ingest_city/source_dc.",
+	}, []string{"stage", "business", "status", "ingest_city", "source_dc"})
 
 	// StageDuration 各阶段处理耗时(秒)。spec 7.1 要求带 ingest_city 标签。
 	StageDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
@@ -137,11 +137,11 @@ var (
 	}, []string{"stage", "ingest_city", "source_dc"})
 
 	// RateLimitRejected 限流拒绝(429)计数(plan T5.1)。
-	// tenant 来源 token;空表示未鉴权或 default 限流
+	// business 来源 token;空表示未鉴权或 default 限流
 	RateLimitRejected = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_rate_limit_rejected_total",
-		Help: "Total number of requests rejected by rate limiter, by tenant/ingest_city/source_dc.",
-	}, []string{"tenant", "ingest_city", "source_dc"})
+		Help: "Total number of requests rejected by rate limiter, by business/ingest_city/source_dc.",
+	}, []string{"business", "ingest_city", "source_dc"})
 
 	// WalBytesVec WAL 当前占用字节(Gauge)。spec 7.1 要求带 ingest_city 标签。
 	WalBytesVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
@@ -183,8 +183,8 @@ var (
 	// BytesIn / BytesOut 网络流量。
 	BytesIn = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_bytes_in_total",
-		Help: "Total bytes received, by tenant/ingest_city/source_dc.",
-	}, []string{"tenant", "ingest_city", "source_dc"})
+		Help: "Total bytes received, by business/ingest_city/source_dc.",
+	}, []string{"business", "ingest_city", "source_dc"})
 
 	BytesOut = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "gateway_bytes_out_total",

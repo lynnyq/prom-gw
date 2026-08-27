@@ -14,7 +14,7 @@ import org.slf4j.LoggerFactory;
 /**
  * KafkaRecordDeserializer 自定义 Kafka 反序列化器,保留 key + value + headers。
  *
- * Flink 默认的 valueOnlyDeserializer 会丢弃 key 和 headers,而 prom-gw 的租户/机房
+ * Flink 默认的 valueOnlyDeserializer 会丢弃 key 和 headers,而 prom-gw 的业务/机房
  * 信息都在 headers 里,必须自定义。
  */
 public class KafkaRecordDeserializer implements KafkaRecordDeserializationSchema<KafkaRecord> {
@@ -23,7 +23,7 @@ public class KafkaRecordDeserializer implements KafkaRecordDeserializationSchema
 
     @Override
     public void deserialize(ConsumerRecord<byte[], byte[]> record, org.apache.flink.util.Collector<KafkaRecord> out) {
-        // 提取所有 Kafka headers(prom-gw 写入的 tenant/source_dc/ingest_city/...)
+        // 提取所有 Kafka headers(prom-gw 写入的 business/source_dc/ingest_city/...)
         Map<String, String> headers = new HashMap<>();
         Headers hdrs = record.headers();
         if (hdrs != null) {

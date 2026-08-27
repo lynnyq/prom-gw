@@ -4,7 +4,7 @@
 //
 // 接口设计原则:
 //   - Authenticator.Verify 必须线程安全
-//   - 返回 auth.Tenant 而非 string,扩展字段无需改 receiver
+//   - 返回 auth.Business 而非 string,扩展字段无需改 receiver
 //   - 错误用 sentinels(ErrTokenMissing / ErrTokenInvalid / ErrTokenExpired / ErrTokenRevoked),
 //     方便 metric 分类(gateway_auth_fail_total{reason})
 package auth
@@ -26,12 +26,12 @@ var (
 	ErrTokenRevoked = errors.New("auth: token revoked")
 )
 
-// Tenant 鉴权成功后的租户信息。
+// Business 鉴权成功后的业务方信息。
 // 字段顺序与 yaml 对齐;新增字段时注意 json/yaml 双向兼容。
-type Tenant struct {
-	Name         string // 租户短名,作为 sample.Tenant
+type Business struct {
+	Name         string // 业务短名,作为 sample.Business
 	DefaultTopic string // 路由未命中时的兜底 topic
-	TenantID     string // IAM 主键(本地模式为占位)
+	BusinessID   string // IAM 主键(本地模式为占位)
 	RateLimit    int    // samples/s 上限
 }
 
@@ -39,5 +39,5 @@ type Tenant struct {
 //
 // Verify 在 ctx 取消时应立即返回 ctx.Err();其他错误见 sentinels。
 type Authenticator interface {
-	Verify(ctx context.Context, token string) (Tenant, error)
+	Verify(ctx context.Context, token string) (Business, error)
 }

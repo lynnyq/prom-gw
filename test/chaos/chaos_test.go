@@ -93,16 +93,16 @@ func (h *chaosHarness) Close() {
 
 type stubAuth struct{}
 
-func (s *stubAuth) Verify(_ context.Context, token string) (auth.Tenant, error) {
+func (s *stubAuth) Verify(_ context.Context, token string) (auth.Business, error) {
 	if token == "tk_chaos" {
-		return auth.Tenant{
-			Name: "chaos-tenant", TenantID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000,
+		return auth.Business{
+			Name: "chaos-tenant", BusinessID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000,
 		}, nil
 	}
-	return auth.Tenant{}, auth.ErrTokenInvalid
+	return auth.Business{}, auth.ErrTokenInvalid
 }
-func (s *stubAuth) ListTenants() []auth.Tenant {
-	return []auth.Tenant{{Name: "chaos-tenant", TenantID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000}}
+func (s *stubAuth) ListBusinesses() []auth.Business {
+	return []auth.Business{{Name: "chaos-tenant", BusinessID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000}}
 }
 
 // buildPayload 构造 1 个 TimeSeries + 1 个 Sample, snappy 编码。

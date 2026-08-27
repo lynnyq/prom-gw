@@ -34,7 +34,7 @@ var (
 //
 // 字段说明:
 //   - Name: 规则集唯一名
-//   - Tenant: 适用租户(v1 单 ruleset 全局生效,字段保留为多租户预留)
+//   - Business: 适用业务(v1 单 ruleset 全局生效,字段保留为多业务预留)
 //   - SourceTopic: 标记该 ruleset 处理哪类数据(仅 spec 文档,运行期不参与逻辑);
 //     YAML tag 为 input_topic(与 design §5.1 对齐),Go 字段名保留 SourceTopic 以减少改动
 //   - DefaultTopic: 没路由命中时的兜底 topic
@@ -43,7 +43,7 @@ var (
 //   - Version: 单调递增版本号,用于热更新 / 回滚 / 审计
 type RuleSet struct {
 	Name         string  `yaml:"name" json:"name"`
-	Tenant       string  `yaml:"tenant,omitempty" json:"tenant,omitempty"`
+	Business     string  `yaml:"business,omitempty" json:"business,omitempty"`
 	SourceTopic  string  `yaml:"input_topic,omitempty" json:"source_topic,omitempty"`
 	DefaultTopic string  `yaml:"default_topic" json:"default_topic"`
 	Match        Match   `yaml:"match,omitempty" json:"match,omitempty"`

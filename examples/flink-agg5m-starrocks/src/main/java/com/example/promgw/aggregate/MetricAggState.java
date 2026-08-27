@@ -35,14 +35,11 @@ public class MetricAggState implements Serializable {
     /** 所有原始值(用于 p50/p99 精确计算) */
     public List<Double> samples = new ArrayList<>();
     /** 元数据(来自第一条 sample,后续应一致) */
-    public String tenant;
+    public String business;
     public String metric;
     public Map<String, String> labels;
     public String sourceDc;
     public String ingestCity;
-    public String ingestDc;
-    public long ingestTimeMs;
-    public String traceparent;
 
     /** reset 重置累加器(复用对象,减少 GC)。 */
     public void reset() {
@@ -51,14 +48,11 @@ public class MetricAggState implements Serializable {
         max = Double.NEGATIVE_INFINITY;
         min = Double.POSITIVE_INFINITY;
         samples.clear();
-        tenant = null;
+        business = null;
         metric = null;
         labels = null;
         sourceDc = null;
         ingestCity = null;
-        ingestDc = null;
-        ingestTimeMs = 0;
-        traceparent = null;
     }
 
     /**
@@ -76,14 +70,11 @@ public class MetricAggState implements Serializable {
         fields.put("max", Types.DOUBLE);
         fields.put("min", Types.DOUBLE);
         fields.put("samples", Types.LIST(Types.DOUBLE));
-        fields.put("tenant", Types.STRING);
+        fields.put("business", Types.STRING);
         fields.put("metric", Types.STRING);
         fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
         fields.put("sourceDc", Types.STRING);
         fields.put("ingestCity", Types.STRING);
-        fields.put("ingestDc", Types.STRING);
-        fields.put("ingestTimeMs", Types.LONG);
-        fields.put("traceparent", Types.STRING);
         return Types.POJO(MetricAggState.class, fields);
     }
 

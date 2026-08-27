@@ -1,10 +1,10 @@
 // Package parser 把 prompb.WriteRequest 转换为内部 Sample 列表,
-// 填入请求级 Meta(tenant / tenant_id / source_dc / trace_id 等)。
+// 填入请求级 Meta(business / source_dc / trace_id 等)。
 //
 // Sample 内部表示设计与 spec 一致:
 //   - 字段紧凑,整结构 ≤ 256 字节
 //   - 不存 TraceID(走 request-scoped context)
-//   - Tenant/SourceDC 走 stringpool.Intern 复用
+//   - Business/SourceDC 走 stringpool.Intern 复用
 //   - Labels 容量 4 起,扩容时复用底层数组
 package parser
 
@@ -23,8 +23,7 @@ type Label struct {
 // Sample 清洗后进入规则引擎的最小数据单元。
 // 注意: TraceID 字段被刻意移除,由 ctx 透传(见 T1.12 OTel 接入)。
 type Sample struct {
-	Tenant     string // 来源租户,stringpool 复用
-	TenantID   string // 未来 IAM 主键,v1 可空
+	Business   string // 业务标识,stringpool 复用
 	SourceDC   string // 来自哪个机房,stringpool 复用
 	IngestCity string // 城市标识(bj/sz/hf),stringpool 复用
 	Metric     string
@@ -40,12 +39,12 @@ type Sample struct {
 }
 
 // SeriesKey 返回 series 的稳定 hash key,用于 Kafka 分区 + 状态型 stage 索引。
-// 算法: FNV-1a 64,对 (tenant, metric, sorted labels) 拼接后计算。
-// 拼接格式: tenant + "\x00" + metric + "\x00" + name + "=" + value + "\x00"
+// 算法: FNV-1a 64,对 (business, metric, sorted labels) 拼接后计算。
+// 拼接格式: business + "\x00" + metric + "\x00" + name + "=" + value + "\x00"
 // (用 \x00 避免 a="x"b="y" 与 a="xb"="y" 碰撞)
 func (s Sample) SeriesKey() uint64 {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte(s.Tenant))
+	_, _ = h.Write([]byte(s.Business))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(s.Metric))
 	_, _ = h.Write([]byte{0})
@@ -62,8 +61,7 @@ func (s Sample) SeriesKey() uint64 {
 // 适用于 stage 之间流转,以及死值丢弃后仍要保留原值的场景。
 func (s Sample) Clone() Sample {
 	cp := Sample{
-		Tenant:     s.Tenant,
-		TenantID:   s.TenantID,
+		Business:   s.Business,
 		SourceDC:   s.SourceDC,
 		IngestCity: s.IngestCity,
 		Metric:     s.Metric,
@@ -79,8 +77,7 @@ func (s Sample) Clone() Sample {
 // InternStrings 把高频复用字符串入池(调用方在 Parse 之后调一次即可)。
 // 注意: 不要对 Labels 里的 Value 全部入池,可能爆内存;只对 Name 与已知有限集入池。
 func (s *Sample) InternStrings() {
-	s.Tenant = stringpool.Intern(s.Tenant)
-	s.TenantID = stringpool.Intern(s.TenantID)
+	s.Business = stringpool.Intern(s.Business)
 	s.SourceDC = stringpool.Intern(s.SourceDC)
 	s.IngestCity = stringpool.Intern(s.IngestCity)
 	s.Metric = stringpool.Intern(s.Metric)

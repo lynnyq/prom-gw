@@ -1,5 +1,5 @@
 // Package stringpool 提供字符串 intern 池,降低 1.5M samples/s
-// 持续场景下 tenant / source_dc / metric 等高复用字符串的 GC 压力。
+// 持续场景下 business / source_dc / metric 等高复用字符串的 GC 压力。
 //
 // 设计: 简单的 sync.Map,key/value 都是 string;读多写少场景友好。
 // 限制: 不主动 GC,只增长;如需回收,Phase 5 末做内存 profile 再决定。

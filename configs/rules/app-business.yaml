@@ -1,6 +1,6 @@
-# app-business tenant 业务规则集示例
+# app-business 业务规则集示例
 # ----------------------------------------------------------------------------
-# 描述: app-business 租户的指标经过以下流水线清洗后投递到 Kafka
+# 描述: app-business 业务的指标经过以下流水线清洗后投递到 Kafka
 #   1) relabel: 删除 env/instance 标签(噪音标签),保留 job/region/team
 #   2) route:   按 team 标签把数据路由到不同 topic;命中不到走 default_topic
 #   3) sample:  兜底按 0.1(10%)采样,降低下游存储压力
@@ -10,7 +10,7 @@
 # ----------------------------------------------------------------------------
 rulesets:
   - name: app-business
-    tenant: app-business
+    business: app-business
     default_topic: prom.bj.routed.app_business
     version: 1
     match:

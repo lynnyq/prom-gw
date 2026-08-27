@@ -47,11 +47,11 @@ type ManagerDeps struct {
 	Logger  *zap.Logger
 }
 
-// AuthProvider 提供 ListTenants 所需元数据(避免直接依赖具体 type)。
+// AuthProvider 提供 ListBusinesses 所需元数据(避免直接依赖具体 type)。
 //
 // LocalTokenAuthenticator 实现此接口。
 type AuthProvider interface {
-	ListTenants() []auth.Tenant
+	ListBusinesses() []auth.Business
 }
 
 // NewManagerService 构造。
@@ -222,21 +222,21 @@ func (s *ManagerService) ListHistory(_ context.Context, name string) []config.Hi
 	return s.history.List(name)
 }
 
-func (s *ManagerService) ListTenants(_ context.Context) []TenantInfo {
+func (s *ManagerService) ListBusinesses(_ context.Context) []BusinessInfo {
 	if s.auth == nil {
 		return nil
 	}
-	src := s.auth.ListTenants()
-	out := make([]TenantInfo, 0, len(src))
+	src := s.auth.ListBusinesses()
+	out := make([]BusinessInfo, 0, len(src))
 	for _, t := range src {
-		out = append(out, TenantInfo{
-			Tenant:       t.Name,
-			TenantID:     t.TenantID,
+		out = append(out, BusinessInfo{
+			Business:     t.Name,
+			BusinessID:   t.BusinessID,
 			DefaultTopic: t.DefaultTopic,
 			RateLimit:    t.RateLimit,
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Tenant < out[j].Tenant })
+	sort.Slice(out, func(i, j int) bool { return out[i].Business < out[j].Business })
 	return out
 }
 

@@ -21,7 +21,7 @@ import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 public class SampleWithMeta implements Serializable {
 
     private static final long serialVersionUID = 1L;
-    private String tenant;
+    private String business;
     private String metric;
     private Map<String, String> labels;
     private double value;
@@ -35,11 +35,11 @@ public class SampleWithMeta implements Serializable {
     // Flink POJO 需要无参构造
     public SampleWithMeta() {}
 
-    public SampleWithMeta(String tenant, String metric, Map<String, String> labels,
+    public SampleWithMeta(String business, String metric, Map<String, String> labels,
                           double value, long timestampMs,
                           String sourceDc, String ingestCity, String ingestDc,
                           long ingestTimeMs, String traceparent) {
-        this.tenant = tenant;
+        this.business = business;
         this.metric = metric;
         this.labels = labels;
         this.value = value;
@@ -51,8 +51,8 @@ public class SampleWithMeta implements Serializable {
         this.traceparent = traceparent;
     }
 
-    public String getTenant() { return tenant; }
-    public void setTenant(String tenant) { this.tenant = tenant; }
+    public String getBusiness() { return business; }
+    public void setBusiness(String business) { this.business = business; }
 
     public String getMetric() { return metric; }
     public void setMetric(String metric) { this.metric = metric; }
@@ -90,7 +90,7 @@ public class SampleWithMeta implements Serializable {
      */
     public static TypeInformation<SampleWithMeta> typeInfo() {
         Map<String, TypeInformation<?>> fields = new LinkedHashMap<>();
-        fields.put("tenant", Types.STRING);
+        fields.put("business", Types.STRING);
         fields.put("metric", Types.STRING);
         fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
         fields.put("value", Types.DOUBLE);

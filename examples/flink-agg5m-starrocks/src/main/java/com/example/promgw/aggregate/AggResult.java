@@ -13,10 +13,10 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
 
 /**
- * AggResult 5min 聚合结果,对应 StarRocks sr_bj_metrics_5m 表一行。
+ * AggResult 5min 聚合结果,对应 StarRocks metrics_5m 表一行。
  *
  * 字段顺序与 StarRocks DDL 对齐:
- *   ts, metric, tenant, business, ingest_city, source_dc, labels_hash,
+ *   ts, metric, business, ingest_city, source_dc, labels_hash,
  *   labels, sample_count, value_sum, value_max, value_min, value_avg,
  *   value_p50, value_p99, ingest_time
  *
@@ -31,11 +31,10 @@ public class AggResult implements Serializable {
     @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd HH:mm:ss")
     private Date ts;
     private String metric;
-    private String tenant;
     private String business;
     private String ingestCity;
     private String sourceDc;
-    /** labels 的 XXH3 hash,作 PK 键列 */
+    /** labels 的 SHA-1 hash,作 PK 键列 */
     private String labelsHash;
     /** 原始 labels(非键列,仅查询用) */
     private Map<String, String> labels;
@@ -58,9 +57,6 @@ public class AggResult implements Serializable {
 
     public String getMetric() { return metric; }
     public void setMetric(String metric) { this.metric = metric; }
-
-    public String getTenant() { return tenant; }
-    public void setTenant(String tenant) { this.tenant = tenant; }
 
     public String getBusiness() { return business; }
     public void setBusiness(String business) { this.business = business; }
@@ -113,7 +109,6 @@ public class AggResult implements Serializable {
         Map<String, TypeInformation<?>> fields = new LinkedHashMap<>();
         fields.put("ts", BasicTypeInfo.DATE_TYPE_INFO);
         fields.put("metric", Types.STRING);
-        fields.put("tenant", Types.STRING);
         fields.put("business", Types.STRING);
         fields.put("ingestCity", Types.STRING);
         fields.put("sourceDc", Types.STRING);

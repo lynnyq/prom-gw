@@ -5,7 +5,7 @@
 //   - 真正的错误通过 gateway_produce_errors_total{reason} 指标和可选 callback 反馈
 //   - 同步等待用 Flush(timeout),仅在停机 + WAL 落盘场景使用
 //   - Channel 满且超过 produce_block_timeout 默认 100ms → ErrProduceBackpressure
-//   - Headers map 透传(traceparent / tenant / source_dc / ingest_dc / ingest_time_ms 等)
+//   - Headers map 透传(traceparent / business / source_dc / ingest_dc / ingest_time_ms 等)
 //   - 启动参数: linger=50ms, batch=1MB, acks=all, 压缩=zstd
 //   - 幂等写:v1 默认开启 enable.idempotence(franz-go 默认值,无需显式设置)
 package kafkasink

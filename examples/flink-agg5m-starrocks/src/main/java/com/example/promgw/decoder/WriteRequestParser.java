@@ -48,8 +48,8 @@ public final class WriteRequestParser {
             seriesList.add(new PromSample.ParsedSeries(metricName, labels, samples));
         }
 
-        // 从 header 提取租户/机房信息(payload 里没有这些)
-        String tenant       = headers != null ? getOrDefault(headers, "tenant", "") : "";
+        // 从 header 提取业务/机房信息(payload 里没有这些)
+        String business     = headers != null ? getOrDefault(headers, "business", "") : "";
         String sourceDc     = headers != null ? getOrDefault(headers, "source_dc", "") : "";
         String ingestCity   = headers != null ? getOrDefault(headers, "ingest_city", "") : "";
         String ingestDc     = headers != null ? getOrDefault(headers, "ingest_dc", "") : "";
@@ -57,7 +57,7 @@ public final class WriteRequestParser {
         String traceparent  = headers != null ? getOrDefault(headers, "traceparent", "") : "";
 
         return new PromSample(
-                seriesList, tenant, sourceDc, ingestCity, ingestDc,
+                seriesList, business, sourceDc, ingestCity, ingestDc,
                 parseLongSafe(ingestTimeMs), traceparent
         );
     }

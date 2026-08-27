@@ -36,7 +36,7 @@ class PromWriteRequestDecoderTest {
 
         // 模拟 Kafka headers(prom-gw 写入的元数据)
         Map<String, String> headers = new HashMap<>();
-        headers.put("tenant", "app-business");
+        headers.put("business", "app-business");
         headers.put("source_dc", "dc-bj-dongba");
         headers.put("ingest_city", "bj");
         headers.put("ingest_dc", "dc-bj-dongba");
@@ -46,7 +46,7 @@ class PromWriteRequestDecoderTest {
         PromSample sample = decoder.decode(snappyBytes, headers);
 
         assertThat(sample).isNotNull();
-        assertThat(sample.getTenant()).isEqualTo("app-business");
+        assertThat(sample.getBusiness()).isEqualTo("app-business");
         assertThat(sample.getSourceDc()).isEqualTo("dc-bj-dongba");
         assertThat(sample.getIngestCity()).isEqualTo("bj");
         assertThat(sample.getIngestTimeMs()).isEqualTo(1786431389413L);
@@ -87,13 +87,13 @@ class PromWriteRequestDecoderTest {
         byte[] snappyBytes = Snappy.compress(protobufBytes);
 
         Map<String, String> headers = new HashMap<>();
-        headers.put("tenant", "infra");
+        headers.put("business", "infra");
         headers.put("ingest_city", "sz");
 
         PromSample sample = decoder.decode(snappyBytes, headers);
 
         assertThat(sample).isNotNull();
-        assertThat(sample.getTenant()).isEqualTo("infra");
+        assertThat(sample.getBusiness()).isEqualTo("infra");
         assertThat(sample.getIngestCity()).isEqualTo("sz");
         assertThat(sample.getTimeseries()).hasSize(2);
 

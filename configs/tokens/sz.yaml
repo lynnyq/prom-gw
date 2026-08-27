@@ -11,18 +11,18 @@
 # 安全提示: 此文件含 token 密钥,切勿入仓
 # ============================================================
 tokens:
-  # ── app-business 租户 ──
+  # ── app-business 业务 ──
   # 业务应用指标:CPU/内存/QPS/RT/错误率 等
   "tk_app_business_prod":
-    tenant: app-business
-    tenant_id: "1001"
+    business: app-business
+    business_id: "1001"
     default_topic: prom.sz.routed.app_business    # 写入的 topic(ruleset 配置后被覆盖)
     rate_limit: 80000                             # samples/s 上限,超过返回 429
 
-  # ── infra 租户 ──
+  # ── infra 业务 ──
   # 基础设施指标:主机/网络/存储/容器 等
   "tk_infra_prod":
-    tenant: infra
-    tenant_id: "1002"
+    business: infra
+    business_id: "1002"
     default_topic: prom.sz.routed.infra           # 写入的 topic
     rate_limit: 50000

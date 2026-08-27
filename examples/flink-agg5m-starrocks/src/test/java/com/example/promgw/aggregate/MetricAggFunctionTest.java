@@ -24,11 +24,11 @@ class MetricAggFunctionTest {
         labels.put("job", "prometheus");
 
         // 加入 3 个 sample
-        agg.add(new SampleWithMeta("tenant1", "up", labels, 1.0, 1000L,
+        agg.add(new SampleWithMeta("biz1", "up", labels, 1.0, 1000L,
                 "dc1", "bj", "dc1", 0L, ""), acc);
-        agg.add(new SampleWithMeta("tenant1", "up", labels, 2.0, 2000L,
+        agg.add(new SampleWithMeta("biz1", "up", labels, 2.0, 2000L,
                 "dc1", "bj", "dc1", 0L, ""), acc);
-        agg.add(new SampleWithMeta("tenant1", "up", labels, 3.0, 3000L,
+        agg.add(new SampleWithMeta("biz1", "up", labels, 3.0, 3000L,
                 "dc1", "bj", "dc1", 0L, ""), acc);
 
         MetricAggState result = agg.getResult(acc);
@@ -37,7 +37,7 @@ class MetricAggFunctionTest {
         assertThat(result.sum).isEqualTo(6.0);
         assertThat(result.max).isEqualTo(3.0);
         assertThat(result.min).isEqualTo(1.0);
-        assertThat(result.tenant).isEqualTo("tenant1");
+        assertThat(result.business).isEqualTo("biz1");
         assertThat(result.metric).isEqualTo("up");
         // avg 在 window function 计算,这里只验证 sum/count
         assertThat(result.sum / result.count).isEqualTo(2.0);
@@ -76,11 +76,11 @@ class MetricAggFunctionTest {
         labels.put("job", "prom");
 
         MetricAggState a = agg.createAccumulator();
-        agg.add(new SampleWithMeta("t1", "up", labels, 1.0, 1000L, "dc1", "bj", "dc1", 0L, ""), a);
-        agg.add(new SampleWithMeta("t1", "up", labels, 2.0, 2000L, "dc1", "bj", "dc1", 0L, ""), a);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 1.0, 1000L, "dc1", "bj", "dc1", 0L, ""), a);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 2.0, 2000L, "dc1", "bj", "dc1", 0L, ""), a);
 
         MetricAggState b = agg.createAccumulator();
-        agg.add(new SampleWithMeta("t1", "up", labels, 3.0, 3000L, "dc1", "bj", "dc1", 0L, ""), b);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 3.0, 3000L, "dc1", "bj", "dc1", 0L, ""), b);
 
         MetricAggState merged = agg.merge(a, b);
 

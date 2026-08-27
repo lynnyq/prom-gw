@@ -291,9 +291,9 @@ prom-gw 写入 Kafka 时,一个 WriteRequest 含 N 个 sample 会产生 N 条消
 
 Kafka 端 zstd(由 connector 自动解)→ snappy(本工程解)→ protobuf → WriteRequest
 
-### 3. 租户信息从 header 提取
+### 3. 业务信息从 header 提取
 
-payload 是 Prometheus 原始字节,不含租户信息。tenant/source_dc/ingest_city 等从 Kafka header 提取。
+payload 是 Prometheus 原始字节,不含业务信息。business/source_dc/ingest_city 等从 Kafka header 提取。
 
 ### 4. SHA-1 labels hash
 

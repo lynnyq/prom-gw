@@ -26,8 +26,8 @@ servers:
 tags:
   - name: rulesets
     description: 规则集管理(create / read / reload / rollback / history)
-  - name: tenants
-    description: 当前 token→tenant 映射
+  - name: businesses
+    description: 当前 token→business 映射
   - name: stats
     description: 运行时统计
   - name: health
@@ -259,16 +259,16 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
-  /v1/tenants:
+  /v1/businesses:
     get:
-      tags: [tenants]
-      summary: 列出当前 token→tenant 映射
+      tags: [businesses]
+      summary: 列出当前 token→business 映射
       description: |
-        返回当前 LocalTokenAuthenticator 中已加载的 tenant 元数据。
-        **不返回 token 明文**,只返回 name + tenant_id + default_topic + rate_limit。
+        返回当前 LocalTokenAuthenticator 中已加载的 business 元数据。
+        **不返回 token 明文**,只返回 name + business_id + default_topic + rate_limit。
       responses:
         "200":
-          description: tenant 列表
+          description: business 列表
           content:
             application/json:
               schema:
@@ -279,10 +279,10 @@ paths:
                       data:
                         type: object
                         properties:
-                          tenants:
+                          businesses:
                             type: array
                             items:
-                              $ref: "#/components/schemas/TenantInfo"
+                              $ref: "#/components/schemas/BusinessInfo"
         "403":
           $ref: "#/components/responses/Forbidden"
         "405":
@@ -476,20 +476,20 @@ components:
           type: object
           nullable: true
 
-    TenantInfo:
+    BusinessInfo:
       type: object
-      required: [tenant, default_topic, rate_limit]
+      required: [business, default_topic, rate_limit]
       properties:
-        tenant:
+        business:
           type: string
-        tenant_id:
+        business_id:
           type: string
           description: IAM 主键,本地模式可能为空
         default_topic:
           type: string
         rate_limit:
           type: integer
-          description: per-tenant 限流(samples/s)
+          description: per-business 限流(samples/s)
 
     StatsResp:
       type: object

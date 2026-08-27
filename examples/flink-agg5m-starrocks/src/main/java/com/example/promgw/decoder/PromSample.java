@@ -16,7 +16,7 @@ import org.apache.flink.api.common.typeinfo.TypeInfoFactory;
  *
  * 对应 prom-gw 内部 parser.Sample + 整个 WriteRequest:
  *   - timeseries: WriteRequest 中所有 TimeSeries(每个含 labels + samples)
- *   - tenant/sourceDc/ingestCity/...: 从 Kafka header 提取(不在 payload 里)
+ *   - business/sourceDc/ingestCity/...: 从 Kafka header 提取(不在 payload 里)
  *
  * 注意:一条 Kafka 消息的 payload 是整个 WriteRequest,包含 N 个 series。
  * 上游(prom-gw)为每个 sample 产生一条消息但 payload 相同,需在 DedupFunction 去重。
@@ -28,7 +28,7 @@ public class PromSample implements Serializable {
 
     private static final long serialVersionUID = 1L;
     private List<ParsedSeries> timeseries;
-    private String tenant;
+    private String business;
     private String sourceDc;
     private String ingestCity;
     private String ingestDc;
@@ -43,10 +43,10 @@ public class PromSample implements Serializable {
     }
 
     public PromSample(List<ParsedSeries> timeseries,
-                      String tenant, String sourceDc, String ingestCity,
+                      String business, String sourceDc, String ingestCity,
                       String ingestDc, long ingestTimeMs, String traceparent) {
         this.timeseries = timeseries != null ? timeseries : new ArrayList<>();
-        this.tenant = tenant;
+        this.business = business;
         this.sourceDc = sourceDc;
         this.ingestCity = ingestCity;
         this.ingestDc = ingestDc;
@@ -57,8 +57,8 @@ public class PromSample implements Serializable {
     public List<ParsedSeries> getTimeseries() { return timeseries; }
     public void setTimeseries(List<ParsedSeries> timeseries) { this.timeseries = timeseries; }
 
-    public String getTenant() { return tenant; }
-    public void setTenant(String tenant) { this.tenant = tenant; }
+    public String getBusiness() { return business; }
+    public void setBusiness(String business) { this.business = business; }
 
     public String getSourceDc() { return sourceDc; }
     public void setSourceDc(String sourceDc) { this.sourceDc = sourceDc; }
@@ -85,7 +85,7 @@ public class PromSample implements Serializable {
     public static TypeInformation<PromSample> typeInfo() {
         Map<String, TypeInformation<?>> fields = new LinkedHashMap<>();
         fields.put("timeseries", Types.LIST(ParsedSeries.typeInfo()));
-        fields.put("tenant", Types.STRING);
+        fields.put("business", Types.STRING);
         fields.put("sourceDc", Types.STRING);
         fields.put("ingestCity", Types.STRING);
         fields.put("ingestDc", Types.STRING);
