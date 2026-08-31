@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lynnyq/bigdata/internal/parser"
-	"github.com/lynnyq/bigdata/internal/sink"
+	"github.com/lynnyq/prom-gw/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/sink"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

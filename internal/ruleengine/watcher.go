@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/lynnyq/bigdata/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/obs"
 	"go.uber.org/zap"
 )
 

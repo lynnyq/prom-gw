@@ -7,11 +7,11 @@
   </appender>
 
   <!-- prom-gw flink 工程日志级别 -->
-  <logger name="com.example.promgw" level="INFO"/>
+  <logger name="com.lynnyq.promgw" level="INFO"/>
   <!-- 解码细节降级到 DEBUG,避免大量日志 -->
-  <logger name="com.example.promgw.decoder" level="WARN"/>
+  <logger name="com.lynnyq.promgw.decoder" level="WARN"/>
   <!-- Stream Load 细节 INFO 即可 -->
-  <logger name="com.example.promgw.sink" level="INFO"/>
+  <logger name="com.lynnyq.promgw.sink" level="INFO"/>
 
   <root level="WARN">
     <appender-ref ref="STDOUT"/>

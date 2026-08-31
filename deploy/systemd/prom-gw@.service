@@ -1,6 +1,6 @@
 [Unit]
 Description=Prometheus RemoteWrite Gateway (city=%i)
-Documentation=https://github.com/lynnyq/bigdata
+Documentation=https://github.com/lynnyq/prom-gw
 After=network.target
 Wants=network-online.target
 
@@ -8,17 +8,53 @@ Wants=network-online.target
 Type=simple
 User=bdops
 Group=bdops
-# 通过 systemd template 实例化,按城市加载独立配置
-#   - prom-gw@bj.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/bj/default.yaml)
-#   - prom-gw@sz.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/sz/default.yaml)
-#   - prom-gw@hf.service -> /appdata/prom-gw/conf/rules.yaml (源: configs/rules/hf/default.yaml)
+# ── systemd template 实例化 ──
+# prom-gw@bj.service -> 北京机房
+# prom-gw@sz.service -> 深圳机房
+# prom-gw@hf.service -> 合肥机房
+#
+# 三层配置加载顺序:
+#   1. EnvironmentFile(/etc/prom-gw/prom-gw.%i.env) → Kafka/Tracing
+#   2. Environment(硬编码) → INGEST_CITY/PROM_GW_*/GOMAXPROCS
+#   3. ExecStart flags → 最终覆盖
+
+# 已硬编码的环境变量(无需在 env 文件重复)
 Environment=INGEST_CITY=%i
 Environment=PROM_GW_CONFIG=/appdata/prom-gw/conf/rules.yaml
 Environment=PROM_GW_TOKENS=/appdata/prom-gw/conf/tokens.yaml
+Environment=GOMAXPROCS=8
+Environment=GOMEMLIMIT=6GiB
+
+# 按城市加载 env 文件(KAFKA_BROKERS、OTEL endpoint 等差异化配置)
+# %i 会被替换为模板实例名(bj/sz/hf)
+EnvironmentFile=-/etc/prom-gw/prom-gw.%i.env
+
+# ⚠️ 必须显式指定 --source-dc,否则 Kafka header source_dc=dc-unknown
+# 写入格式:dc-<城市>-<机房>
+# 例: dc-bj-dongba / dc-sz-wulian / dc-hf-yuehai
+# 注意:%i 是城市(bj/sz/hf),source-dc 还需要具体机房标识
 ExecStart=/appdata/prom-gw/bin/prom-gw \
   --config=/appdata/prom-gw/conf/rules.yaml \
   --tokens=/appdata/prom-gw/conf/tokens.yaml \
-  --ingest-city=%i
+  --ingest-city=%i \
+  --source-dc=dc-%i-dc01 \
+  --write-addr=:19201 \
+  --metrics-addr=:8080 \
+  --health-addr=:8081 \
+  --admin-addr=:8082 \
+  --admin-allow-cidr=127.0.0.1/32,10.0.0.0/8 \
+  --wal-dir=/data/wal \
+  --wal-max-bytes=53687091200 \
+  --wal-disk-used-ratio=0.80
+# ── 可选:Nacos 配置中心(默认关闭,需要时取消注释) ──
+# 密码建议放在 env 文件(NACOS_USERNAME/NACOS_PASSWORD),不要硬编码
+# 启用后 ReadWritePaths 需追加 /data/nacos_snapshot.json
+#  --nacos-addr=nacos-cluster:8848 \
+#  --nacos-namespace=prod \
+#  --nacos-data-id=prom-gw-rules \
+#  --nacos-group=GATEWAY \
+#  --nacos-snapshot-path=/data/nacos_snapshot.json
+
 Restart=always
 RestartSec=5
 StartLimitIntervalSec=60
@@ -36,11 +72,6 @@ KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=30
 FinalKillSignal=SIGKILL
-
-# 环境
-Environment=GOMAXPROCS=8
-Environment=GOMEMLIMIT=6GiB
-EnvironmentFile=-/etc/prom-gw/prom-gw.env
 
 # 安全加固
 NoNewPrivileges=true

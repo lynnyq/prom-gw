@@ -13,7 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lynnyq/bigdata/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/obs"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )

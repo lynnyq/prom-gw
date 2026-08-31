@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 )
 
 // numGoroutines 单独函数便于 GaugeFunc 引用与单测。

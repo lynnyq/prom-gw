@@ -23,10 +23,10 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/internal/parser"
-	"github.com/lynnyq/bigdata/internal/router"
-	"github.com/lynnyq/bigdata/internal/sink"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/router"
+	"github.com/lynnyq/prom-gw/internal/sink"
 	"go.uber.org/zap"
 )
 

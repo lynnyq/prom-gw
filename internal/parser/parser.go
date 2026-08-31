@@ -14,7 +14,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/lynnyq/bigdata/pkg/stringpool"
+	"github.com/lynnyq/prom-gw/pkg/stringpool"
 	"github.com/prometheus/prometheus/prompb"
 )
 

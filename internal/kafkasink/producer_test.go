@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/twmb/franz-go/pkg/kgo"

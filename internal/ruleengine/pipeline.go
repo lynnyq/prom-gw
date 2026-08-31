@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/internal/parser"
-	"github.com/lynnyq/bigdata/internal/sink"
-	"github.com/lynnyq/bigdata/pkg/tracex"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/sink"
+	"github.com/lynnyq/prom-gw/pkg/tracex"
 	"go.uber.org/zap"
 )
 

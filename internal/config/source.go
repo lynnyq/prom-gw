@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/internal/ruleengine"
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/ruleengine"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 	"go.uber.org/zap"
 )
 

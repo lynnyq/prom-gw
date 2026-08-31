@@ -12,7 +12,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/lynnyq/bigdata/pkg/tracex"
+	"github.com/lynnyq/prom-gw/pkg/tracex"
 	"go.opentelemetry.io/otel/trace"
 )
 

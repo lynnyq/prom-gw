@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/lynnyq/bigdata/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/parser"
 )
 
 // Sentinel 错误(便于 admin / Service 包装)。

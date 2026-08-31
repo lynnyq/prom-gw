@@ -12,7 +12,7 @@ import (
 	"sort"
 	"sync/atomic"
 
-	"github.com/lynnyq/bigdata/internal/auth"
+	"github.com/lynnyq/prom-gw/internal/auth"
 	"gopkg.in/yaml.v3"
 )
 

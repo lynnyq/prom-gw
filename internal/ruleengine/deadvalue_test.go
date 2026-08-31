@@ -16,7 +16,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/lynnyq/bigdata/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/parser"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

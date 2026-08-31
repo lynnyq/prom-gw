@@ -20,7 +20,7 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/v2/clients"
 	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 	"go.uber.org/zap"
 )
 

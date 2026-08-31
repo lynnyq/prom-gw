@@ -6,9 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/lynnyq/bigdata/internal/auth"
-	"github.com/lynnyq/bigdata/internal/config"
-	"github.com/lynnyq/bigdata/internal/ruleengine"
+	"github.com/lynnyq/prom-gw/internal/auth"
+	"github.com/lynnyq/prom-gw/internal/config"
+	"github.com/lynnyq/prom-gw/internal/ruleengine"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"

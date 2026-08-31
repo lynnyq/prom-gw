@@ -24,7 +24,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 
 ```bash
 flink run -d -p 24 \
-  -c com.example.promgw.Agg5mJob \
+  -c com.lynnyq.promgw.Agg5mJob \
   target/flink-agg5m-starrocks-1.0.0.jar \
   --env prod \
   --kafka-brokers kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094 \
@@ -64,7 +64,7 @@ mvn clean compile -U
 
 说明:
 - 21 个 Java 源文件全部编译通过
-- protobuf-maven-plugin 自动生成 `com.example.promgw.proto.PromProtos` 系列类
+- protobuf-maven-plugin 自动生成 `com.lynnyq.promgw.proto.PromProtos` 系列类
 - 依赖从阿里云镜像下载(缺失时 fallback 到 Maven Central)
 
 ### 步骤 2:单元测试验证
@@ -75,25 +75,25 @@ mvn test
 
 预期输出:
 ```
-[INFO] Running com.example.promgw.util.LabelsHasherTest
+[INFO] Running com.lynnyq.promgw.util.LabelsHasherTest
 [INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.aggregate.MetricAggFunctionTest
+[INFO] Running com.lynnyq.promgw.aggregate.MetricAggFunctionTest
 [INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.decoder.PromWriteRequestDecoderTest
+[INFO] Running com.lynnyq.promgw.decoder.PromWriteRequestDecoderTest
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.JobConfigTest
+[INFO] Running com.lynnyq.promgw.JobConfigTest
 [INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.sink.StarRocksStreamLoadClientTest
+[INFO] Running com.lynnyq.promgw.sink.StarRocksStreamLoadClientTest
 [INFO] Tests run: 12, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.sink.StarRocksSinkTest
+[INFO] Running com.lynnyq.promgw.sink.StarRocksSinkTest
 [INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.sink.BufferingStarRocksSinkTest
+[INFO] Running com.lynnyq.promgw.sink.BufferingStarRocksSinkTest
 [INFO] Tests run: 6, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.Agg5mJobOffsetsTest
+[INFO] Running com.lynnyq.promgw.Agg5mJobOffsetsTest
 [INFO] Tests run: 15, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.dlq.KafkaDlqHandlerSerializationTest
+[INFO] Running com.lynnyq.promgw.dlq.KafkaDlqHandlerSerializationTest
 [INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0
-[INFO] Running com.example.promgw.FlinkSerializationAuditTest
+[INFO] Running com.lynnyq.promgw.FlinkSerializationAuditTest
 [INFO] Tests run: 17, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Results:
 [INFO] Tests run: 90, Failures: 0, Errors: 0, Skipped: 0
@@ -136,7 +136,7 @@ ls -lh target/*.jar
 验证主类与 Protobuf 生成类:
 ```bash
 unzip -p target/flink-agg5m-starrocks-1.0.0.jar META-INF/MANIFEST.MF | grep Main-Class
-# Main-Class: com.example.promgw.Agg5mJob
+# Main-Class: com.lynnyq.promgw.Agg5mJob
 
 jar tf target/flink-agg5m-starrocks-1.0.0.jar | grep PromProtos | head -5
 # com/example/promgw/proto/PromProtos$WriteRequest.class
@@ -169,10 +169,10 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 
 启动后日志关键字(表示消费正常):
 ```
-[main] INFO com.example.promgw.Agg5mJob - Starting Agg5mJob env=local
-[main] INFO com.example.promgw.Agg5mJob - Kafka source: brokers=localhost:9092, topic=prom.local.routed.app_business
-[main] INFO com.example.promgw.Agg5mJob - StarRocks sink: host=localhost:8030, db=prom, table=metrics_5m
-[flink-...-source] INFO com.example.promgw.decoder.PromWriteRequestDecoder - decoded 12 samples from 1 WriteRequest
+[main] INFO com.lynnyq.promgw.Agg5mJob - Starting Agg5mJob env=local
+[main] INFO com.lynnyq.promgw.Agg5mJob - Kafka source: brokers=localhost:9092, topic=prom.local.routed.app_business
+[main] INFO com.lynnyq.promgw.Agg5mJob - StarRocks sink: host=localhost:8030, db=prom, table=metrics_5m
+[flink-...-source] INFO com.lynnyq.promgw.decoder.PromWriteRequestDecoder - decoded 12 samples from 1 WriteRequest
 ```
 
 ### 步骤 5:消费结果验证
@@ -347,12 +347,12 @@ payload 是 Prometheus 原始字节,不含业务信息。business/source_dc/inge
 
 ```bash
 # 从最早位点回放历史数据
-flink run -d -c com.example.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
+flink run -d -c com.lynnyq.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
   --env prod --kafka-brokers kafka-1.sz:9094 --topic prom.sz.routed.app_business \
   --kafka-start-from earliest
 
 # 从指定时间戳回放(用于故障恢复)
-flink run -d -c com.example.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
+flink run -d -c com.lynnyq.promgw.Agg5mJob target/flink-agg5m-starrocks-1.0.0.jar \
   --env prod --kafka-brokers kafka-1.sz:9094 --topic prom.sz.routed.app_business \
   --kafka-start-from timestamp --kafka-start-timestamp 1700000000000
 ```

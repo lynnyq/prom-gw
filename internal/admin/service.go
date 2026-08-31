@@ -18,9 +18,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lynnyq/bigdata/internal/auth"
-	"github.com/lynnyq/bigdata/internal/config"
-	"github.com/lynnyq/bigdata/internal/ruleengine"
+	"github.com/lynnyq/prom-gw/internal/auth"
+	"github.com/lynnyq/prom-gw/internal/config"
+	"github.com/lynnyq/prom-gw/internal/ruleengine"
 	"go.uber.org/zap"
 )
 

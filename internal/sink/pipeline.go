@@ -12,9 +12,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/pkg/safego"
-	"github.com/lynnyq/bigdata/pkg/tracex"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/pkg/safego"
+	"github.com/lynnyq/prom-gw/pkg/tracex"
 	"go.uber.org/zap"
 )
 

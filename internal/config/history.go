@@ -12,7 +12,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/lynnyq/bigdata/internal/ruleengine"
+	"github.com/lynnyq/prom-gw/internal/ruleengine"
 )
 
 // HistoryConfig ring buffer 配置。

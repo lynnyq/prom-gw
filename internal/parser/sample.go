@@ -11,7 +11,7 @@ package parser
 import (
 	"hash/fnv"
 
-	"github.com/lynnyq/bigdata/pkg/stringpool"
+	"github.com/lynnyq/prom-gw/pkg/stringpool"
 )
 
 // Label 内部标签表示(已排序,保证 hash 一致)。

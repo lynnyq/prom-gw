@@ -18,8 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.uber.org/zap"
 )

@@ -25,9 +25,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/internal/parser"
-	"github.com/lynnyq/bigdata/internal/sink"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/sink"
 	"go.uber.org/zap"
 )
 

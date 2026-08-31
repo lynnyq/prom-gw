@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/lynnyq/bigdata/internal/kafkasink"
-	"github.com/lynnyq/bigdata/internal/obs"
-	"github.com/lynnyq/bigdata/internal/wal"
-	"github.com/lynnyq/bigdata/pkg/safego"
+	"github.com/lynnyq/prom-gw/internal/kafkasink"
+	"github.com/lynnyq/prom-gw/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/wal"
+	"github.com/lynnyq/prom-gw/pkg/safego"
 	"go.uber.org/zap"
 )
 

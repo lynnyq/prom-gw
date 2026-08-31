@@ -1,4 +1,4 @@
-module github.com/lynnyq/bigdata
+module github.com/lynnyq/prom-gw
 
 go 1.26.4
 

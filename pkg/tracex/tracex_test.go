@@ -12,7 +12,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lynnyq/bigdata/internal/obs"
+	"github.com/lynnyq/prom-gw/internal/obs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"

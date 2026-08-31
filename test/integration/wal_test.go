@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lynnyq/bigdata/internal/parser"
-	"github.com/lynnyq/bigdata/internal/sink"
-	"github.com/lynnyq/bigdata/internal/wal"
+	"github.com/lynnyq/prom-gw/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/sink"
+	"github.com/lynnyq/prom-gw/internal/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -11,8 +11,8 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/klauspost/compress/snappy"
-	"github.com/lynnyq/bigdata/internal/auth"
-	"github.com/lynnyq/bigdata/internal/parser"
+	"github.com/lynnyq/prom-gw/internal/auth"
+	"github.com/lynnyq/prom-gw/internal/parser"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

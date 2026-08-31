@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lynnyq/bigdata/internal/wal"
+	"github.com/lynnyq/prom-gw/internal/wal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
