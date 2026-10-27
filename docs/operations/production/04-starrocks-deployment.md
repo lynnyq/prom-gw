@@ -818,6 +818,214 @@ CREATE TABLE IF NOT EXISTS metrics_1d (
 - **BUCKETS 递减**:5m 表 32 桶(高并发写)、1h 表 16 桶、1d 表 8 桶(减少 tablet 开销)
 - **独立 TTL**:各表 `dynamic_partition` 独立清理,互不影响
 
+#### 6.4.6 按 sysid 分表(S 系统多租户隔离)
+
+当需要按 S 系统(sysid)隔离数据到不同表时,Flink Sink 支持按 sysid 动态路由到 `metrics_<sysid>_5m` 表。完整 DDL 模板见 `deploy/starrocks/init_tables_sysid.sql`。
+
+**表命名规范**:`metrics_<sysid>_5m`(如 `metrics_s001_5m`、`metrics_s002_5m`),外加一张 `metrics_default_5m` 兜底表(未匹配 sysid 时写入)。
+
+**建表模板**(每个 sysid 一张表,结构与 `metrics_5m` 一致,额外含 `sysid` 列):
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_s001_5m (
+  ts            DATETIME     NOT NULL COMMENT '5 min 窗口起始时间',
+  metric        VARCHAR(128) NOT NULL COMMENT '指标名',
+  business      VARCHAR(64)  NOT NULL COMMENT '业务标识(来自 token)',
+  ingest_city   VARCHAR(16)  NOT NULL COMMENT '采集城市:bj/sz/hf',
+  source_dc     VARCHAR(32)  NOT NULL COMMENT '源数据中心',
+  sysid         VARCHAR(64)  NOT NULL COMMENT 'S 系统 ID 标识(与表名后缀一致)',
+  labels_hash   VARCHAR(64)  NOT NULL COMMENT 'labels 的 SHA-1 hash,作 PK 键列',
+  labels        MAP<VARCHAR(64), VARCHAR(256)> COMMENT '原始 labels(仅查询)',
+  sample_count  BIGINT       NOT NULL COMMENT '窗口样本数',
+  value_sum     DOUBLE       NOT NULL COMMENT '窗口求和',
+  value_max     DOUBLE                COMMENT '窗口最大值',
+  value_min     DOUBLE                COMMENT '窗口最小值',
+  value_avg     DOUBLE                COMMENT '窗口均值',
+  value_p50     DOUBLE                COMMENT '窗口 p50',
+  value_p99     DOUBLE                COMMENT '窗口 p99'
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, sysid, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 32
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-7",
+    "dynamic_partition.end" = "3",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "32",
+    "compression" = "LZ4",
+    "replicated_storage" = "true",
+    "enable_unique_key_merge_on_write" = "false"
+  );
+```
+
+**新增 S 系统建表示例**:
+
+```bash
+# 新增 S 系统 s003 时,只需执行建表 SQL(无需改代码)
+mysql -h sr-fe-1 -P9030 -uprom_gw -p'PromGwPassword123' observability \
+  -e "CREATE TABLE IF NOT EXISTS metrics_s003_5m LIKE metrics_s001_5m;"
+```
+
+> **注意**:`CREATE TABLE ... LIKE` 会复制表结构和属性,但不会复制数据。新增 sysid 表后,需同步在 Flink 作业启动参数 `--sysid-table-mapping` 中添加 `s003=metrics_s003_5m`。
+
+**兜底表 `metrics_default_5m`**(对应 Flink `--default-table`):
+
+未知 sysid 的数据写入此表,便于排查未配置的 sysid。属性与 sysid 表略有不同(桶数和留存期更小,因为数据量通常较少):
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_default_5m (
+  -- 列结构与 metrics_s001_5m 完全一致
+  ...
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, sysid, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 16    -- 16 桶(数据量小)
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-3",                  -- 仅保留 3 天(兜底表无需长留存)
+    "dynamic_partition.end" = "1",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "16",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
+```
+
+#### 6.4.7 1h / 1d 表(按 sysid 分表)
+
+Flink 只实时写入 5m 表,1h 和 1d 表通过 StarRocks 周期任务(JOB)从下级表级联聚合。每个 sysid 独立建表 + 独立调度,互不影响。
+
+**表命名规范**:
+
+| 窗口 | 表名 | 桶数 | 留存 | 来源 |
+|------|------|------|------|------|
+| 5min | `metrics_<sysid>_5m` | 32 | 7 天 | Flink Stream Load 实时写入 |
+| 1h | `metrics_<sysid>_1h` | 16 | 90 天 | 5m → 1h 级联聚合 |
+| 1d | `metrics_<sysid>_1d` | 8 | 3 年 | 1h → 1d 级联聚合 |
+
+**1h 表 DDL**(在 5m 表基础上,桶数 16、留存 90 天):
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_s001_1h (
+  ts            DATETIME     NOT NULL COMMENT '1 h 窗口起始时间',
+  metric        VARCHAR(128) NOT NULL,
+  business      VARCHAR(64)  NOT NULL,
+  ingest_city   VARCHAR(16)  NOT NULL,
+  source_dc     VARCHAR(32)  NOT NULL,
+  sysid         VARCHAR(64)  NOT NULL COMMENT 's 系统 ID',
+  labels_hash   VARCHAR(64)  NOT NULL,
+  labels        MAP<VARCHAR(64), VARCHAR(256)>,
+  sample_count  BIGINT       NOT NULL,
+  value_sum     DOUBLE       NOT NULL,
+  value_max     DOUBLE,
+  value_min     DOUBLE,
+  value_avg     DOUBLE,
+  value_p50     DOUBLE,
+  value_p99     DOUBLE
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, sysid, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 16
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-90",
+    "dynamic_partition.end" = "3",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "16",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
+```
+
+**1d 表 DDL**(桶数 8、留存 3 年、按月分区):
+
+```sql
+CREATE TABLE IF NOT EXISTS metrics_s001_1d (
+  ts            DATETIME     NOT NULL COMMENT '1 day 窗口起始时间',
+  metric        VARCHAR(128) NOT NULL,
+  business      VARCHAR(64)  NOT NULL,
+  ingest_city   VARCHAR(16)  NOT NULL,
+  source_dc     VARCHAR(32)  NOT NULL,
+  sysid         VARCHAR(64)  NOT NULL,
+  labels_hash   VARCHAR(64)  NOT NULL,
+  labels        MAP<VARCHAR(64), VARCHAR(256)>,
+  sample_count  BIGINT       NOT NULL,
+  value_sum     DOUBLE       NOT NULL,
+  value_max     DOUBLE,
+  value_min     DOUBLE,
+  value_avg     DOUBLE,
+  value_p50     DOUBLE,
+  value_p99     DOUBLE
+) ENGINE=OLAP
+  PRIMARY KEY(ts, metric, business, ingest_city, source_dc, sysid, labels_hash)
+  PARTITION BY RANGE(ts) ()
+  DISTRIBUTED BY HASH(metric, business) BUCKETS 8
+  PROPERTIES (
+    "storage_medium" = "SSD",
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "MONTH",
+    "dynamic_partition.start" = "-36",
+    "dynamic_partition.end" = "2",
+    "dynamic_partition.prefix" = "p",
+    "dynamic_partition.buckets" = "8",
+    "compression" = "LZ4",
+    "replicated_storage" = "true"
+  );
+```
+
+**级联聚合任务**(每个 sysid 独立调度):
+
+```sql
+-- 5m → 1h(每小时整点执行)
+CREATE JOB IF NOT EXISTS agg_5m_to_1h_s001
+ON SCHEDULE EVERY 1 HOUR STARTS (date_trunc('hour', NOW()) + INTERVAL 1 HOUR)
+DO
+  INSERT OVERWRITE metrics_s001_1h
+  SELECT
+      date_trunc('hour', ts) AS ts, metric, business, ingest_city, source_dc, sysid,
+      labels_hash, labels,
+      SUM(sample_count) AS sample_count,
+      SUM(value_sum) AS value_sum,
+      MAX(value_max) AS value_max,
+      MIN(value_min) AS value_min,
+      SUM(value_sum) / SUM(sample_count) AS value_avg,
+      percentile_approx(value_p50, 0.5) AS value_p50,
+      percentile_approx(value_p99, 0.99) AS value_p99
+  FROM metrics_s001_5m
+  WHERE ts >= date_trunc('hour', NOW()) - INTERVAL 1 HOUR
+    AND ts <  date_trunc('hour', NOW())
+  GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
+
+-- 1h → 1d(每天 0 点执行)
+CREATE JOB IF NOT EXISTS agg_1h_to_1d_s001
+ON SCHEDULE EVERY 1 DAY STARTS (date_trunc('day', NOW()) + INTERVAL 1 DAY)
+DO
+  INSERT OVERWRITE metrics_s001_1d
+  SELECT
+      date_trunc('day', ts) AS ts, metric, business, ingest_city, source_dc, sysid,
+      labels_hash, labels,
+      SUM(sample_count) AS sample_count,
+      SUM(value_sum) AS value_sum,
+      MAX(value_max) AS value_max,
+      MIN(value_min) AS value_min,
+      SUM(value_sum) / SUM(sample_count) AS value_avg,
+      percentile_approx(value_p50, 0.5) AS value_p50,
+      percentile_approx(value_p99, 0.99) AS value_p99
+  FROM metrics_s001_1h
+  WHERE ts >= date_trunc('day', NOW()) - INTERVAL 1 DAY
+    AND ts <  date_trunc('day', NOW())
+  GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
+```
+
+> **新增 S 系统**:把 `s001` 替换为新 sysid,执行 1h/1d 建表 + 两个级联任务即可。完整模板见 `deploy/starrocks/init_tables_sysid.sql`。
+
 ### 6.5 级联聚合 SQL(5m → 1h → 1d)
 
 三表数据并非 Flink 一次性产出。Flink 只实时写入 5m 表,1h 和 1d 表通过周期 SQL 任务从下级表级联聚合而成。

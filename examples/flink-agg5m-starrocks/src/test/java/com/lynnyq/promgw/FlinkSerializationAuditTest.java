@@ -78,12 +78,13 @@ class FlinkSerializationAuditTest {
         labels.put("job", "prometheus");
         SampleWithMeta swm = new SampleWithMeta(
                 "business", "up", labels, 1.0, 1700000000000L,
-                "dc-bj", "bj", "dc-bj", 1700000000000L, "trace-1");
+                "dc-bj", "bj", "dc-bj", 1700000000000L, "trace-1", "s001");
         byte[] bytes = InstantiationUtil.serializeObject(swm);
         SampleWithMeta restored = InstantiationUtil.deserializeObject(bytes, getClass().getClassLoader());
         assertThat(restored.getMetric()).isEqualTo("up");
         assertThat(restored.getValue()).isEqualTo(1.0);
         assertThat(restored.getLabels()).containsEntry("job", "prometheus");
+        assertThat(restored.getSysid()).isEqualTo("s001");
     }
 
     @Test
@@ -130,10 +131,11 @@ class FlinkSerializationAuditTest {
 
     @Test
     void testDlqMessageSerializable() throws Exception {
-        DlqMessage msg = new DlqMessage("payload", "label-001", "HTTP 500", 0, 1700000000000L);
+        DlqMessage msg = new DlqMessage("payload", "metrics_s001_5m", "label-001", "HTTP 500", 0, 1700000000000L);
         byte[] bytes = InstantiationUtil.serializeObject(msg);
         DlqMessage restored = InstantiationUtil.deserializeObject(bytes, getClass().getClassLoader());
         assertThat(restored.getLabel()).isEqualTo("label-001");
+        assertThat(restored.getTable()).isEqualTo("metrics_s001_5m");
         assertThat(restored.getError()).isEqualTo("HTTP 500");
     }
 
@@ -187,7 +189,7 @@ class FlinkSerializationAuditTest {
     void testStarRocksSinkWithDlqSerializable() throws Exception {
         DlqHandler dlq = new KafkaDlqHandler("broker:9092", "prom.dlq");
         StarRocksSink sink = new StarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", dlq);
         byte[] bytes = InstantiationUtil.serializeObject(sink);
         assertThat(bytes).isNotEmpty();
@@ -196,7 +198,7 @@ class FlinkSerializationAuditTest {
     @Test
     void testStarRocksSinkWithoutDlqSerializable() throws Exception {
         StarRocksSink sink = new StarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", null);
         byte[] bytes = InstantiationUtil.serializeObject(sink);
         assertThat(bytes).isNotEmpty();
@@ -206,7 +208,7 @@ class FlinkSerializationAuditTest {
     void testBufferingStarRocksSinkWithDlqSerializable() throws Exception {
         DlqHandler dlq = new KafkaDlqHandler("broker:9092", "prom.dlq");
         BufferingStarRocksSink sink = new BufferingStarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", dlq,
                 500, 10_000L);
         byte[] bytes = InstantiationUtil.serializeObject(sink);
@@ -216,7 +218,7 @@ class FlinkSerializationAuditTest {
     @Test
     void testBufferingStarRocksSinkWithoutDlqSerializable() throws Exception {
         BufferingStarRocksSink sink = new BufferingStarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", null,
                 500, 10_000L);
         byte[] bytes = InstantiationUtil.serializeObject(sink);

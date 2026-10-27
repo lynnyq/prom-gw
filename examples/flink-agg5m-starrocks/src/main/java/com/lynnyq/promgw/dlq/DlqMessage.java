@@ -8,6 +8,7 @@ import java.io.Serializable;
  *
  * 字段:
  *   - original:  原始 AggResult 的 JSON 字符串
+ *   - table:     目标 StarRocks 表名(多表模式下用于重放路由;单表模式下为固定表名)
  *   - label:     对应的 Stream Load label(重放时复用,保证幂等)
  *   - error:     失败原因
  *   - retryCount: 已重试次数(重放工具递增)
@@ -18,6 +19,7 @@ public class DlqMessage implements Serializable {
 
     private static final long serialVersionUID = 1L;
     private String original;
+    private String table;
     private String label;
     private String error;
     private int retryCount;
@@ -25,8 +27,9 @@ public class DlqMessage implements Serializable {
 
     public DlqMessage() {}
 
-    public DlqMessage(String original, String label, String error, int retryCount, long timestamp) {
+    public DlqMessage(String original, String table, String label, String error, int retryCount, long timestamp) {
         this.original = original;
+        this.table = table;
         this.label = label;
         this.error = error;
         this.retryCount = retryCount;
@@ -35,6 +38,9 @@ public class DlqMessage implements Serializable {
 
     public String getOriginal() { return original; }
     public void setOriginal(String original) { this.original = original; }
+
+    public String getTable() { return table; }
+    public void setTable(String table) { this.table = table; }
 
     public String getLabel() { return label; }
     public void setLabel(String label) { this.label = label; }

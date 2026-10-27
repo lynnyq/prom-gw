@@ -150,7 +150,7 @@ public class StarRocksSink extends RichSinkFunction<AggResult> {
             return;
         }
         String payload = mapper.writeValueAsString(result);
-        dlqHandler.send(label, payload, error);
+        dlqHandler.send(label, payload, table, error);
     }
 
     private static String formatTs(Date d) {

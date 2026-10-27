@@ -159,8 +159,10 @@ prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清�
 | `prom.bj.routed.infra` | prom-gw | `team=infra` | Flink (infra 聚合作业) | 基础设施指标(主机/网络) |
 | `prom.bj.routed.data` | prom-gw | `team=data` | Flink (data 聚合作业) | 数据平台指标(离线/实时计算) |
 | `prom.bj.routed.app_business` | prom-gw | `team` 未命中规则兜底 | Flink (app_business 聚合作业) | 通用业务指标兜底桶 |
+| `prom.bj.routed.<sysid>` | prom-gw | `sysid=<sysid>` | Flink (sysid 分表作业) | S 系统按 sysid 分桶(如 s001/s002),每 sysid 一 topic |
+| `prom.bj.routed.default` | prom-gw | `sysid` 未命中规则兜底 | Flink (sysid 分表作业) | S 系统未匹配 sysid 的兜底桶 |
 
-> **配置位置**:[configs/rules/app-business.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml) 的 `route.rules` 和 `default_topic` 字段。
+> **配置位置**:[configs/rules/app-business.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml) 的 `route.rules` 和 `default_topic` 字段。S 系统 sysid 路由见 [configs/rules/sysid-routing.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/sysid-routing.yaml)。
 
 **路由规则示例**(来自 [app-business.yaml:29-36](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml#L29-L36)):
 
@@ -192,22 +194,26 @@ DLQ topic 中消息格式为 JSON,包含原始 AggResult、label(用于幂等去
 | `prom.bj.routed.infra` | 64 | 3 | 3 天 | prom-gw | Flink (infra 作业) | 基础设施数据(team=infra) |
 | `prom.bj.routed.data` | 64 | 3 | 3 天 | prom-gw | Flink (data 作业) | 数据平台数据(team=data) |
 | `prom.bj.routed.app_business` | 64 | 3 | 3 天 | prom-gw | Flink (app_business 作业) | 通用业务兜底桶 |
+| `prom.bj.routed.<sysid>` | 64 | 3 | 3 天 | prom-gw | Flink (sysid 分表作业) | S 系统按 sysid 分桶,每 sysid 一 topic |
+| `prom.bj.routed.default` | 64 | 3 | 3 天 | prom-gw | Flink (sysid 分表作业) | S 系统 sysid 兜底桶 |
 | `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | Flink StarRocksSink | DLQ 重放工具 | Stream Load 失败死信队列 |
 
 深圳(`sz`)、合肥(`hf`)同理,分别使用 `prom.sz.*` 和 `prom.hf.*` 前缀。
 
-**三城 topic 总数**:每城 5 个 × 3 城 = **15 个 topic**。
+**三城 topic 总数**:每城 5 个(基础业务 topic)+ N 个(sysid topic,按 S 系统数量)+ 1 个(default 兜底)× 3 城。sysid topic 数量随 S 系统接入数动态增长,新增 S 系统只需预创建 topic 并修改 prom-gw 路由配置,无需改代码。
 
 #### 2.3.4 数据流向
 
 ```
 Prometheus
-  │ remote_write (snappy+protobuf)
+  │ remote_write (snappy+protobuf, 含 sysid 标签)
   ▼
 ┌─────────────────────────────────────────────────┐
 │ prom-gw (单进程同步处理)                        │
 │   1. receiver: 验证 token                      │
 │   2. rule engine: relabel + route + sample     │
+│      - 按 team 路由 → core/infra/data/app_business
+│      - 按 sysid 路由 → s001/s002/.../default   │
 │   3. sink: 直接写入 Kafka (routed topic)        │
 │   失败时:写入 WAL 降级,后续自动回灌            │
 └─────────────────────────────────────────────────┘
@@ -217,15 +223,24 @@ Prometheus
 │ prom.bj.routed.core         │  ← prom-gw 直接写入
 │ prom.bj.routed.infra        │     payload = 原始 snappy+protobuf body
 │ prom.bj.routed.data         │     headers = {business, source_dc, ingest_city}
-│ prom.bj.routed.app_business │     (兜底桶)
+│ prom.bj.routed.app_business │     (team 兜底桶)
+│ prom.bj.routed.s001         │  ← sysid 分桶(S 系统 001)
+│ prom.bj.routed.s002         │  ← sysid 分桶(S 系统 002)
+│ prom.bj.routed.default      │     (sysid 兜底桶)
 └─────────────────────────────┘
   │ Flink KafkaSource 消费
   │   1. 解压 snappy
   │   2. 解析 protobuf
-  │   3. 5min 窗口聚合
-  │   4. Stream Load → StarRocks
+  │   3. 提取 sysid 标签
+  │   4. 5min 窗口聚合
+  │   5. 按 sysid 路由到不同 StarRocks 表
+  │   6. Stream Load → StarRocks
   ▼
-StarRocks (metrics_5m 表)
+StarRocks
+  ├─ metrics_5m (单表模式,team 业务)
+  ├─ metrics_s001_5m (sysid=s001)
+  ├─ metrics_s002_5m (sysid=s002)
+  └─ metrics_default_5m (sysid 兜底)
   │
   │ 若 Stream Load 失败 3 次
   ▼
@@ -249,6 +264,13 @@ for cat in core infra data app_business; do
     --config retention.ms=259200000  # 3 天
 done
 
+# S 系统 sysid 分桶 topics(每 sysid 一 topic,新增 S 系统时追加)
+for sysid in s001 s002 default; do
+  kafka-topics.sh --bootstrap-server bj-kafka-1:9092 --create \
+    --topic prom.bj.routed.$sysid --partitions 64 --replication-factor 3 \
+    --config retention.ms=259200000  # 3 天
+done
+
 # dlq topic(分区少、留存长)
 kafka-topics.sh --bootstrap-server bj-kafka-1:9092 --create \
   --topic prom.bj.dlq.sr.5m --partitions 8 --replication-factor 3 \
@@ -257,7 +279,7 @@ kafka-topics.sh --bootstrap-server bj-kafka-1:9092 --create \
 
 #### 2.3.6 为什么规划多个 Topic(目的与用途)
 
-本方案在三城共规划 15 个 topic(每城 5 个 × 3 城),基于以下三个维度的权衡:
+本方案基础业务在三城共规划 15 个 topic(每城 5 个 × 3 城),外加按 S 系统数量动态扩展的 sysid 分桶 topic(每 sysid 一 topic + 1 个 default 兜底),基于以下三个维度的权衡:
 
 **1. 按 team 分桶:业务域隔离,独立扩容**
 

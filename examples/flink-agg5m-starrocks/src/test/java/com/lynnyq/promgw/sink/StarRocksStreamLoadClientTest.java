@@ -63,18 +63,18 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testFollows307RedirectToBe() throws Exception {
         // FE: 收到 PUT,返回 307 + Location 指向 BE
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 feHitCount.incrementAndGet();
                 exchange.getResponseHeaders().add("Location",
-                        "http://127.0.0.1:" + bePort + "/api/prom/metrics_5m/_stream_load");
+                        "http://127.0.0.1:" + bePort + "/api/observability/metrics_5m/_stream_load");
                 exchange.sendResponseHeaders(307, -1);
                 exchange.close();
             }
         });
         // BE: 收到 PUT,返回 200
-        beServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        beServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 beHitCount.incrementAndGet();
@@ -93,7 +93,7 @@ class StarRocksStreamLoadClientTest {
         beServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         String result = client.load("test_label_001", "{\"metric\":\"up\"}", false);
 
@@ -114,7 +114,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void test307WithoutLocationThrows() throws Exception {
         // FE: 返回 307 但无 Location 头
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.sendResponseHeaders(307, -1);
@@ -124,7 +124,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_002", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -135,7 +135,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testNon200ResponseThrows() throws Exception {
         // FE: 直接返回 403
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 String resp = "{\"Status\":\"Forbidden\"}";
@@ -148,7 +148,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_003", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -158,17 +158,17 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testGzipPathStillWorks() throws Exception {
         // FE: 收到 PUT,返回 307 + Location 指向 BE
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getResponseHeaders().add("Location",
-                        "http://127.0.0.1:" + bePort + "/api/prom/metrics_5m/_stream_load");
+                        "http://127.0.0.1:" + bePort + "/api/observability/metrics_5m/_stream_load");
                 exchange.sendResponseHeaders(307, -1);
                 exchange.close();
             }
         });
         // BE: 返回 200
-        beServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        beServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 // 消费请求体
@@ -184,7 +184,7 @@ class StarRocksStreamLoadClientTest {
         beServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         String result = client.load("test_label_004", "{\"metric\":\"up\",\"value\":1.0}", true);
 
@@ -194,12 +194,12 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testRedirectLoopProtection() throws Exception {
         // FE: 每次都返回 307 指向自己,形成循环
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 feHitCount.incrementAndGet();
                 exchange.getResponseHeaders().add("Location",
-                        "http://127.0.0.1:" + fePort + "/api/prom/metrics_5m/_stream_load");
+                        "http://127.0.0.1:" + fePort + "/api/observability/metrics_5m/_stream_load");
                 exchange.sendResponseHeaders(307, -1);
                 exchange.close();
             }
@@ -207,7 +207,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_005", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -219,7 +219,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testDirect200NoRedirect() throws Exception {
         // FE: 直接返回 200(无重定向)
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -233,7 +233,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         String result = client.load("test_label_006", "{\"metric\":\"up\"}", false);
 
@@ -247,7 +247,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testThrowsOnFailStatus() throws Exception {
         // StarRocks 返回 HTTP 200 但 Status=Fail(数据被拒绝)
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -261,7 +261,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_fail", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -274,7 +274,7 @@ class StarRocksStreamLoadClientTest {
         // StarRocks 返回 HTTP 200 + Status=Publish Timeout:
         // 事务已提交仅发布超时,数据最终可见,视为成功。
         // 若误判为失败重试,同 label 会返回 Label Already Exists,又误判失败 → 无意义 DLQ。
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -288,7 +288,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         String result = client.load("test_label_timeout", "{}", false);
         assertThat(result).contains("Publish Timeout");
@@ -297,7 +297,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testLabelAlreadyExistsSucceeds() throws Exception {
         // 同 label 重复提交(网络超时后重试),事务已提交,视为成功
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -311,7 +311,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         String result = client.load("test_label_dup", "{}", false);
         assertThat(result).contains("Label Already Exists");
@@ -321,7 +321,7 @@ class StarRocksStreamLoadClientTest {
     void testThrowsOnAllRowsFiltered() throws Exception {
         // Status=Success 但 NumberLoadedRows=0:全部行被过滤(类型不匹配/列缺失),
         // 一条数据都没落库 → 必须抛异常走重试/DLQ(否则静默丢整批)
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -337,7 +337,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_allfiltered", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -348,7 +348,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testThrowsOnMalformedResponseBody() throws Exception {
         // HTTP 200 但响应体不是 JSON(被网关/代理拦截等场景)
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -362,7 +362,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         assertThatThrownBy(() -> client.load("test_label_malformed", "{}", false))
                 .isInstanceOf(IOException.class)
@@ -372,7 +372,7 @@ class StarRocksStreamLoadClientTest {
     @Test
     void testPartialLoadLogsWarningButSucceeds() throws Exception {
         // 部分行被质量过滤丢弃(正常行为),Status=Success 但 0 < loaded < total
-        feServer.createContext("/api/prom/metrics_5m/_stream_load", new HttpHandler() {
+        feServer.createContext("/api/observability/metrics_5m/_stream_load", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 exchange.getRequestBody().readAllBytes();
@@ -386,7 +386,7 @@ class StarRocksStreamLoadClientTest {
         feServer.start();
 
         StarRocksStreamLoadClient client = new StarRocksStreamLoadClient(
-                "127.0.0.1", fePort, "prom", "metrics_5m", "root", "");
+                "127.0.0.1", fePort, "observability", "metrics_5m", "root", "");
 
         // 部分加载不抛异常(质量过滤是正常行为)
         String result = client.load("test_label_partial", "{}", false);

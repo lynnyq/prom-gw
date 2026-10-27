@@ -31,6 +31,8 @@ public class ExpandWriteRequest implements FlatMapFunction<PromSample, SampleWit
                 continue;
             }
             // 一个 series 通常 1 个 sample,但可能多个,逐个输出
+            // sysid 是 Prometheus 公共标签,从 series labels 中提取,用于 StarRocks 表路由
+            String sysid = series.getLabels() != null ? series.getLabels().get("sysid") : null;
             for (PromSample.ParsedSample s : series.getSamples()) {
                 SampleWithMeta swm = new SampleWithMeta(
                         ps.getBusiness(),
@@ -42,7 +44,8 @@ public class ExpandWriteRequest implements FlatMapFunction<PromSample, SampleWit
                         ps.getIngestCity(),
                         ps.getIngestDc(),
                         ps.getIngestTimeMs(),
-                        ps.getTraceparent()
+                        ps.getTraceparent(),
+                        sysid
                 );
                 out.collect(swm);
             }

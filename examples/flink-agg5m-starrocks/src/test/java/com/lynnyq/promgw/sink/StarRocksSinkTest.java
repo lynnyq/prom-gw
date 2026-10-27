@@ -19,7 +19,7 @@ class StarRocksSinkTest {
 
     private StarRocksSink createSink() {
         return new StarRocksSink(
-                "127.0.0.1", 8030, "prom", "metrics_5m",
+                "127.0.0.1", 8030, "observability", "metrics_5m",
                 "root", "", true, "sz_5m", null);
     }
 

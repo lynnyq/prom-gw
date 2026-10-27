@@ -15,6 +15,7 @@ import com.lynnyq.promgw.sink.DlqHandler;
 import com.lynnyq.promgw.sink.BufferingStarRocksSink;
 import com.lynnyq.promgw.util.LabelsHasher;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Properties;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -116,15 +117,24 @@ public class Agg5mJob {
                 .setParallelism(cfg.aggParallelism);
 
         // 8. Stream Load 写入 StarRocks
+        //    sysid 表路由:若配置了 --sysid-table-mapping,则按 sysid 写入不同表;
+        //    否则退化为单表模式(全部写入 --starrocks-table)。
         DlqHandler dlqHandler = cfg.dlqEnabled
                 ? new KafkaDlqHandler(cfg.dlqBootstrapServers, cfg.dlqTopic)
                 : null;
+
+        Map<String, String> sysidTableMap = cfg.sysidTableMap;
+        String defaultTable = cfg.defaultTable;
+        if (sysidTableMap == null) {
+            sysidTableMap = new java.util.HashMap<>();
+        }
 
         aggStream.addSink(new BufferingStarRocksSink(
                 cfg.srHost, cfg.srPort, cfg.srDb, cfg.srTable,
                 cfg.srUser, cfg.srPassword, cfg.srGzip,
                 cfg.srLabelPrefix, dlqHandler,
-                cfg.srBatchSize, cfg.srBatchIntervalMs
+                cfg.srBatchSize, cfg.srBatchIntervalMs,
+                sysidTableMap, defaultTable
         )).name("starrocks-stream-load-batch");
 
         // 9. 执行
@@ -148,7 +158,7 @@ public class Agg5mJob {
 
         return KafkaSource.<KafkaRecord>builder()
                 .setBootstrapServers(cfg.kafkaBrokers)
-                .setTopics(cfg.kafkaTopic)
+                .setTopics(cfg.getKafkaTopics())
                 .setGroupId(cfg.kafkaGroupId)
                 .setStartingOffsets(buildOffsetsInitializer(cfg))
                 .setDeserializer(new KafkaRecordDeserializer())

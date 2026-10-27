@@ -320,6 +320,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability.hf:4317
 # token 与 topic 的对应关系:
 #   tk_app_business_prod → prom.bj.routed.app_business
 #   tk_infra_prod       → prom.bj.routed.infra
+#   tk_systems_prod     → prom.bj.routed.<sysid>(由 ruleset route 决定)
 # ============================================================
 tokens:
   # ── app-business 业务 ──
@@ -337,6 +338,15 @@ tokens:
     business_id: "1002"
     default_topic: prom.bj.routed.infra           # 写入的 topic
     rate_limit: 50000
+
+  # ── S 系统(sysid 分桶)业务 ──
+  # Prometheus 携带 sysid 标签的 S 系统指标,由 ruleset 按 sysid 路由到不同 topic。
+  # 一个 token 覆盖所有 S 系统,具体 topic 由 sysid-routing ruleset 的 route 规则决定。
+  "tk_systems_prod":
+    business: s-systems
+    business_id: "1003"
+    default_topic: prom.bj.routed.default          # 兜底 topic(ruleset 未命中时使用)
+    rate_limit: 100000                             # S 系统总量级较大,放宽限流
 ```
 
 **字段说明**:
@@ -433,6 +443,42 @@ rulesets:
           - env
           - instance
       # 无 route stage → 全部写入 default_topic (prom.bj.routed.infra)
+
+  # ── S 系统按 sysid 分桶规则集 ──
+  # Prometheus 公共标签含 sysid(系统ID标识),按 sysid 路由到不同 topic,
+  # 下游 Flink 消费后按 sysid 写入不同 StarRocks 表。
+  # 新增 S 系统只需在此追加 match 规则并预创建对应 topic,无需改代码。
+  # 对应 token: tk_systems_prod (business: s-systems)
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.bj.routed.default         # 未匹配 sysid 时的兜底 topic
+    version: 1
+    match:
+      metric_prefix: ""                            # 空 = 全量接收
+    stages:
+      # Stage 1: relabel - 标签清洗
+      # 注意:不要删除 sysid/sproject/datacenter/ip/job 等公共标签,
+      #       下游 Flink 需要 sysid 做表路由。
+      - type: relabel
+        drop_labels:
+          - env                                    # 环境标签(噪音)
+          - instance                               # 实例标签(高基数,用 ip 替代)
+          - pod                                    # Pod 名(高基数)
+        keep_labels: []                            # 空 = 关闭白名单,仅 drop 生效
+        label_map:
+          kubernetes_io_cluster: cluster           # 重命名示例
+
+      # Stage 2: route - 按 sysid 标签分桶到不同 topic
+      - type: route
+        rules:
+          - match: { sysid: "s001" }              # S 系统 001
+            topic: prom.bj.routed.s001
+          - match: { sysid: "s002" }              # S 系统 002
+            topic: prom.bj.routed.s002
+          # 新增 S 系统:追加 match 行 + topic 即可,无需改代码
+          # - match: { sysid: "s003" }
+          #   topic: prom.bj.routed.s003
+          # 未命中 → 写入 default_topic (prom.bj.routed.default)
 
 global:
   rate_limit_per_instance: 100000                # 单实例全局 samples/s 上限
@@ -1053,6 +1099,17 @@ sudo chmod 755 /appdata/prom-gw/bin/prom-gw
 # ruleset 配置(按城市选择源文件)
 sudo cp configs/rules/bj/default.yaml /appdata/prom-gw/conf/rules.yaml
 sudo chmod 644 /appdata/prom-gw/conf/rules.yaml
+
+# ── S 系统 sysid 分桶模式(可选) ──
+# 方式 A:直接用 sysid-routing.yaml 作为 rules.yaml(仅 S 系统数据)
+#   注意:需把文件中 prom.bj.routed.* 替换为对应城市前缀(如 prom.sz.routed.*)
+# sudo cp configs/rules/sysid-routing.yaml /appdata/prom-gw/conf/rules.yaml
+# sudo sed -i 's/prom\.bj\./prom.sz./g' /appdata/prom-gw/conf/rules.yaml  # 深圳机房
+# sudo chmod 644 /appdata/prom-gw/conf/rules.yaml
+#
+# 方式 B:把 sysid-routing ruleset 合并到现有 rules.yaml(与 app-business/infra 共存)
+#   把 sysid-routing.yaml 中的 rulesets[0] 追加到 rules.yaml 的 rulesets 列表即可
+#   Manager 按 metric_prefix fan-out,多个 ruleset 并行处理同一批 samples
 
 # token 配置(按城市选择源文件)
 sudo cp configs/tokens/bj.yaml /appdata/prom-gw/conf/tokens.yaml
@@ -1851,9 +1908,14 @@ prom-gw **禁止 auto-create topic**,所有 routed topics 必须预先用 `kafka
 | `prom.bj.routed.core` | 64 | 3 | 北京核心业务(订单/支付/账户) | route: `team=core` |
 | `prom.bj.routed.infra` | 64 | 3 | 北京基础设施 | route: `team=infra` |
 | `prom.bj.routed.data` | 64 | 3 | 北京数据平台 | route: `team=data` |
-| `prom.sz.routed.*`(同上 4 个) | 64 | 3 | 深圳机房 | Prometheus remote_write → prom-gw@sz → sz Kafka |
-| `prom.hf.routed.*`(同上 4 个) | 64 | 3 | 合肥机房 | 同上 |
+| `prom.bj.routed.s001` | 64 | 3 | 北京 S 系统 001 | route: `sysid=s001` |
+| `prom.bj.routed.s002` | 64 | 3 | 北京 S 系统 002 | route: `sysid=s002` |
+| `prom.bj.routed.default` | 64 | 3 | 北京 S 系统兜底(未匹配 sysid) | sysid-routing ruleset default_topic |
+| `prom.sz.routed.*`(同上) | 64 | 3 | 深圳机房 | Prometheus remote_write → prom-gw@sz → sz Kafka |
+| `prom.hf.routed.*`(同上) | 64 | 3 | 合肥机房 | 同上 |
 | **`_gw_probe`** | 1 | 3 | AdapterSink 健康探测 | probeKafka 往此 topic 发 1B ping 消息 |
+
+> **S 系统 topic 命名规范**:`prom.<city>.routed.<sysid>`,新增 S 系统时按此规范预创建 topic,并在 `rules.yaml` 的 sysid-routing ruleset 中追加匹配规则。
 
 #### 20.2 创建命令(KRaft 模式)
 
@@ -1861,9 +1923,18 @@ prom-gw **禁止 auto-create topic**,所有 routed topics 必须预先用 `kafka
 # 北京机房 broker 清单
 BROKERS="bj-kafka-1:9092,bj-kafka-2:9092,bj-kafka-3:9092"
 
-# 创建 routed topics
+# 创建 routed topics(按 team 分桶)
 for topic in prom.bj.routed.app_business prom.bj.routed.core \
              prom.bj.routed.infra prom.bj.routed.data; do
+  kafka-topics.sh --bootstrap-server $BROKERS \
+    --create --if-not-exists \
+    --topic $topic \
+    --partitions 64 --replication-factor 3
+done
+
+# 创建 S 系统按 sysid 分桶的 topics(新增 S 系统时追加)
+for topic in prom.bj.routed.s001 prom.bj.routed.s002 \
+             prom.bj.routed.default; do
   kafka-topics.sh --bootstrap-server $BROKERS \
     --create --if-not-exists \
     --topic $topic \
@@ -1880,6 +1951,16 @@ kafka-topics.sh --bootstrap-server $BROKERS --list | grep prom.bj
 ```
 
 **⚠️ 生产硬约束**:所有 topic 必须是 **64 分区 3 副本**。broker 默认配置通常是 1 分区 1 副本,auto-create 会导致数据倾斜和单点故障。
+
+**新增 S 系统 topic 创建示例**:
+
+```bash
+# 新增 S 系统 s003 时,只需创建对应 topic(无需改代码)
+kafka-topics.sh --bootstrap-server $BROKERS \
+  --create --if-not-exists \
+  --topic prom.bj.routed.s003 \
+  --partitions 64 --replication-factor 3
+```
 
 ---
 

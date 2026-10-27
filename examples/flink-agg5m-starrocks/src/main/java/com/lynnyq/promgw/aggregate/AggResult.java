@@ -34,6 +34,8 @@ public class AggResult implements Serializable {
     private String business;
     private String ingestCity;
     private String sourceDc;
+    /** s 系统 ID(用于 StarRocks 表路由,BufferingStarRocksSink 根据 sysid 选择目标表) */
+    private String sysid;
     /** labels 的 SHA-1 hash,作 PK 键列 */
     private String labelsHash;
     /** 原始 labels(非键列,仅查询用) */
@@ -66,6 +68,9 @@ public class AggResult implements Serializable {
 
     public String getSourceDc() { return sourceDc; }
     public void setSourceDc(String sourceDc) { this.sourceDc = sourceDc; }
+
+    public String getSysid() { return sysid; }
+    public void setSysid(String sysid) { this.sysid = sysid; }
 
     public String getLabelsHash() { return labelsHash; }
     public void setLabelsHash(String labelsHash) { this.labelsHash = labelsHash; }
@@ -112,6 +117,7 @@ public class AggResult implements Serializable {
         fields.put("business", Types.STRING);
         fields.put("ingestCity", Types.STRING);
         fields.put("sourceDc", Types.STRING);
+        fields.put("sysid", Types.STRING);
         fields.put("labelsHash", Types.STRING);
         fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
         fields.put("sampleCount", Types.LONG);

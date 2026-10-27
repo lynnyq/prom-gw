@@ -1313,7 +1313,7 @@ flink run \
   --group-id flink-agg5m-sz-app-business \
   --starrocks-host <beijing-fe-vip> \
   --starrocks-port 8030 \
-  --starrocks-db prom \
+  --starrocks-db observability \
   --starrocks-table metrics_5m \
   --starrocks-user root \
   --label-prefix sz_5m \

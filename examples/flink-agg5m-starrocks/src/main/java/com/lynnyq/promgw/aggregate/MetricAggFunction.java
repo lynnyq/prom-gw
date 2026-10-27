@@ -35,6 +35,7 @@ public class MetricAggFunction implements AggregateFunction<SampleWithMeta, Metr
             acc.labels = rec.getLabels();
             acc.sourceDc = rec.getSourceDc();
             acc.ingestCity = rec.getIngestCity();
+            acc.sysid = rec.getSysid();
         }
         return acc;
     }
@@ -61,6 +62,7 @@ public class MetricAggFunction implements AggregateFunction<SampleWithMeta, Metr
             a.labels = b.labels;
             a.sourceDc = b.sourceDc;
             a.ingestCity = b.ingestCity;
+            a.sysid = b.sysid;
         }
         return a;
     }

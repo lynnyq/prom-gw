@@ -61,8 +61,8 @@ public class KafkaDlqHandler implements DlqHandler, Serializable {
     }
 
     @Override
-    public void send(String label, String payload, String error) throws Exception {
-        DlqMessage msg = new DlqMessage(payload, label, error, 0, System.currentTimeMillis());
+    public void send(String label, String payload, String table, String error) throws Exception {
+        DlqMessage msg = new DlqMessage(payload, table, label, error, 0, System.currentTimeMillis());
         byte[] value = mapper.writeValueAsBytes(msg);
         // 用 label 作 key,保证同 label 重试落同 partition
         ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(

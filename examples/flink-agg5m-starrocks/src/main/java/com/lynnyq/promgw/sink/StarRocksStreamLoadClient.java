@@ -73,13 +73,26 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
     public StarRocksStreamLoadClient(String feHost, int port,
                                       String db, String table,
                                       String user, String password) {
+        this(feHost, port, db, table, user, password, DEFAULT_TIMEOUT_MS, DEFAULT_TIMEOUT_MS);
+    }
+
+    /**
+     * 支持自定义 HTTP 超时的构造函数(供 DLQ 重放工具等非 Flink 场景使用)。
+     *
+     * @param connectTimeoutMs 连接超时(毫秒)
+     * @param socketTimeoutMs  读超时(毫秒)
+     */
+    public StarRocksStreamLoadClient(String feHost, int port,
+                                      String db, String table,
+                                      String user, String password,
+                                      int connectTimeoutMs, int socketTimeoutMs) {
         this.loadUrl = String.format("http://%s:%d/api/%s/%s/_stream_load",
                 feHost, port, db, table);
         this.authHeader = "Basic " + Base64.getEncoder().encodeToString(
                 (user + ":" + (password == null ? "" : password)).getBytes(StandardCharsets.UTF_8));
         this.requestConfig = RequestConfig.custom()
-                .setConnectTimeout(DEFAULT_TIMEOUT_MS)
-                .setSocketTimeout(DEFAULT_TIMEOUT_MS)
+                .setConnectTimeout(connectTimeoutMs)
+                .setSocketTimeout(socketTimeoutMs)
                 // 关闭自动重定向:由本客户端手动处理 307,
                 // 确保 PUT 方法、body 和 Authorization 头正确转发到 BE
                 .setRedirectsEnabled(false)

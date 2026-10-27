@@ -23,10 +23,9 @@ ExecStart=/usr/lib/jvm/java-17-openjdk/bin/java \
     -XX:HeapDumpPath=/applog/dlq-replayer/ \
     -Dlog.level=${LOG_LEVEL} \
     -Dlog.dir=/applog/dlq-replayer \
-    -Dcity=%i \
-    -jar /appdata/dlq-replayer/lib/dlq-replayer.jar \
-    --city %i \
-    --config /appdata/dlq-replayer/conf/dlq-replayer.properties
+    -cp /appdata/dlq-replayer/lib/flink-agg5m-starrocks-1.0.0.jar \
+    com.lynnyq.promgw.dlq.DlqReplayer \
+    /appdata/dlq-replayer/conf/dlq-replayer.properties
 
 # 优雅停机:SIGTERM 触发消费者优雅关闭(提交已处理 offset,停止 poll)
 KillMode=mixed

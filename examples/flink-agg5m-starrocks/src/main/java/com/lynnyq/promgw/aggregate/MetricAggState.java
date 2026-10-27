@@ -40,6 +40,8 @@ public class MetricAggState implements Serializable {
     public Map<String, String> labels;
     public String sourceDc;
     public String ingestCity;
+    /** s 系统 ID(用于 StarRocks 表路由) */
+    public String sysid;
 
     /** reset 重置累加器(复用对象,减少 GC)。 */
     public void reset() {
@@ -53,6 +55,7 @@ public class MetricAggState implements Serializable {
         labels = null;
         sourceDc = null;
         ingestCity = null;
+        sysid = null;
     }
 
     /**
@@ -75,6 +78,7 @@ public class MetricAggState implements Serializable {
         fields.put("labels", Types.MAP(Types.STRING, Types.STRING));
         fields.put("sourceDc", Types.STRING);
         fields.put("ingestCity", Types.STRING);
+        fields.put("sysid", Types.STRING);
         return Types.POJO(MetricAggState.class, fields);
     }
 

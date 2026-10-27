@@ -1,5 +1,8 @@
 package com.lynnyq.promgw;
 
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * JobConfig 作业配置,从命令行参数解析。
  *
@@ -12,6 +15,13 @@ public class JobConfig {
     // Kafka
     public String kafkaBrokers = "localhost:9092";
     public String kafkaTopic = "prom.local.routed.app_business";
+    /**
+     * 多 topic 列表(由 --topics 逗号分隔解析)。
+     * 若配置了 --topics,则优先使用;否则使用 kafkaTopic 单 topic。
+     * sysid 路由模式下,prom-gw 按 sysid 把数据写入不同 topic(如 prom.<city>.routed.s001),
+     * Flink 需同时消费所有 sysid 对应的 topic。
+     */
+    public String[] kafkaTopics = null;
     public String kafkaGroupId = "flink-agg5m-local";
     public String kafkaSecurityProtocol = "";      // 空 = PLAINTEXT
     public String kafkaSaslMechanism = "";
@@ -33,7 +43,7 @@ public class JobConfig {
     // 不要用 8070 — 部署文档曾误标为 "Stream Load 端口",实际从未配置监听。
     public String srHost = "localhost";
     public int srPort = 8030;
-    public String srDb = "prom";
+    public String srDb = "observability";
     public String srTable = "metrics_5m";
     public String srUser = "root";
     public String srPassword = "";
@@ -42,6 +52,14 @@ public class JobConfig {
     // StarRocks 攒批配置
     public int srBatchSize = 500;               // 攒批行数上限,达到即 flush
     public long srBatchIntervalMs = 10_000L;    // 攒批时间上限(ms),超时即 flush
+
+    // sysid 表路由(核心特性)
+    // sysidTableMap: sysid → StarRocks 表名 映射
+    //   通过 --sysid-table-mapping "s001=metrics_s001_5m,s002=metrics_s002_5m" 配置
+    //   为空时退化为单表模式(全部写入 srTable)
+    public Map<String, String> sysidTableMap = new HashMap<>();
+    // 未知 sysid 的兜底表;为空则丢弃未知 sysid 的数据
+    public String defaultTable = "";
 
     // DLQ
     // dlqBootstrapServers 默认空:未显式指定时回落到 kafkaBrokers(本架构 DLQ 与
@@ -77,6 +95,21 @@ public class JobConfig {
                 case "--topic":
                     cfg.kafkaTopic = next(args, ++i);
                     break;
+                case "--topics":
+                    // 多 topic:逗号分隔,如 "prom.bj.routed.s001,prom.bj.routed.s002"
+                    String topicsStr = next(args, ++i);
+                    if (topicsStr != null && !topicsStr.isEmpty()) {
+                        String[] parts = topicsStr.split(",");
+                        java.util.List<String> list = new java.util.ArrayList<>();
+                        for (String p : parts) {
+                            String t = p.trim();
+                            if (!t.isEmpty()) list.add(t);
+                        }
+                        if (!list.isEmpty()) {
+                            cfg.kafkaTopics = list.toArray(new String[0]);
+                        }
+                    }
+                    break;
                 case "--group-id":
                     cfg.kafkaGroupId = next(args, ++i);
                     break;
@@ -106,6 +139,21 @@ public class JobConfig {
                     break;
                 case "--sr-batch-interval-ms":
                     cfg.srBatchIntervalMs = Long.parseLong(next(args, ++i));
+                    break;
+                case "--sysid-table-mapping":
+                    // sysid → 表名 映射,格式: "s001=metrics_s001_5m,s002=metrics_s002_5m"
+                    String mappingStr = next(args, ++i);
+                    if (mappingStr != null && !mappingStr.isEmpty()) {
+                        for (String pair : mappingStr.split(",")) {
+                            String[] kv = pair.trim().split("=", 2);
+                            if (kv.length == 2 && !kv[0].trim().isEmpty() && !kv[1].trim().isEmpty()) {
+                                cfg.sysidTableMap.put(kv[0].trim(), kv[1].trim());
+                            }
+                        }
+                    }
+                    break;
+                case "--default-table":
+                    cfg.defaultTable = next(args, ++i);
                     break;
                 case "--dlq-bootstrap-servers":
                     cfg.dlqBootstrapServers = next(args, ++i);
@@ -157,6 +205,17 @@ public class JobConfig {
         return cfg;
     }
 
+    /**
+     * getKafkaTopics 返回实际消费的 topic 列表。
+     * 若配置了 --topics 则返回多 topic 数组;否则返回单元素数组 [kafkaTopic]。
+     */
+    public String[] getKafkaTopics() {
+        if (kafkaTopics != null && kafkaTopics.length > 0) {
+            return kafkaTopics;
+        }
+        return new String[]{kafkaTopic};
+    }
+
     /** applyEnvPreset 按 env 设置默认值。 */
     private void applyEnvPreset() {
         if ("prod".equals(env)) {
@@ -174,8 +233,12 @@ public class JobConfig {
     @Override
     public String toString() {
         return "JobConfig{env='" + env + "', kafkaBrokers='" + kafkaBrokers
-                + "', topic='" + kafkaTopic + "', srHost='" + srHost + ":" + srPort
-                + "', srTable='" + srDb + "." + srTable + "', srBatchSize=" + srBatchSize
+                + "', topics=" + java.util.Arrays.toString(getKafkaTopics())
+                + ", srHost='" + srHost + ":" + srPort
+                + "', srTable='" + srDb + "." + srTable
+                + "', sysidTableMap=" + sysidTableMap
+                + ", defaultTable='" + defaultTable
+                + "', srBatchSize=" + srBatchSize
                 + ", srBatchIntervalMs=" + srBatchIntervalMs
                 + "', dlqTopic='" + dlqTopic
                 + "', windowMinutes=" + windowMinutes
@@ -184,3 +247,4 @@ public class JobConfig {
                 + "', kafkaStartTimestamp=" + kafkaStartTimestamp + "}";
     }
 }
+

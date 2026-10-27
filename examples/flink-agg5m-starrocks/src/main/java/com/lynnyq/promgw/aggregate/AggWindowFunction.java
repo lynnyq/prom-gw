@@ -56,6 +56,7 @@ public class AggWindowFunction
         r.setBusiness(business);
         r.setIngestCity(s.ingestCity);
         r.setSourceDc(s.sourceDc);
+        r.setSysid(s.sysid);
         r.setLabelsHash(LabelsHasher.hash(s.labels));
         r.setLabels(s.labels);
         r.setSampleCount(s.count);

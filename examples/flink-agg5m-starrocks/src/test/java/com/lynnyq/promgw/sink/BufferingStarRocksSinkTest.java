@@ -22,7 +22,7 @@ class BufferingStarRocksSinkTest {
 
     private BufferingStarRocksSink createSink() {
         return new BufferingStarRocksSink(
-                "127.0.0.1", 8030, "prom", "metrics_5m",
+                "127.0.0.1", 8030, "observability", "metrics_5m",
                 "root", "", true, "sz_5m", null,
                 500, 10_000L);
     }
@@ -62,9 +62,9 @@ class BufferingStarRocksSinkTest {
         initLabelFmt(sink);
         initTaskIndex(sink, 0);
 
-        String label1 = sink.buildBatchLabel();
-        String label2 = sink.buildBatchLabel();
-        String label3 = sink.buildBatchLabel();
+        String label1 = sink.buildBatchLabel("metrics_5m");
+        String label2 = sink.buildBatchLabel("metrics_5m");
+        String label3 = sink.buildBatchLabel("metrics_5m");
 
         // 每次调用 batchSeq 递增 → label 不同
         assertThat(label1).isNotEqualTo(label2);
@@ -85,8 +85,8 @@ class BufferingStarRocksSinkTest {
         initBatchSeq(sink1, 1);
 
         // 同时间同 seq,但 taskIndex 不同 → label 不同
-        String label0 = sink0.buildBatchLabel();
-        String label1 = sink1.buildBatchLabel();
+        String label0 = sink0.buildBatchLabel("metrics_5m");
+        String label1 = sink1.buildBatchLabel("metrics_5m");
         assertThat(label0).isNotEqualTo(label1);
     }
 

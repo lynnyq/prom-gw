@@ -44,8 +44,9 @@ DLQ topic 中的消息为 JSON 格式的 `DlqMessage`:
 
 ```json
 {
-  "original": "{\"ts\":\"2026-08-25 10:50:00\",\"metric\":\"app_cpu_usage\",\"business\":\"order-service\",\"ingest_city\":\"bj\",\"source_dc\":\"beijing-dongba\",\"labels_hash\":\"a1b2c3d4\",\"labels\":{\"host\":\"host-1\"},\"sample_count\":300,\"value_sum\":15432.5,\"value_max\":98.7,\"value_min\":12.3,\"value_avg\":51.44,\"ingest_time\":\"2026-08-25 10:55:02\"}",
-  "label": "bj_5m_20260825_1050_app-business_0dcdef41",
+  "original": "{\"ts\":\"2026-08-25 10:50:00\",\"metric\":\"app_cpu_usage\",\"business\":\"order-service\",\"ingest_city\":\"bj\",\"source_dc\":\"beijing-dongba\",\"sysid\":\"s001\",\"labels_hash\":\"a1b2c3d4\",\"labels\":{\"host\":\"host-1\"},\"sample_count\":300,\"value_sum\":15432.5,\"value_max\":98.7,\"value_min\":12.3,\"value_avg\":51.44}",
+  "table": "metrics_s001_5m",
+  "label": "bj_5m_20260825_1050_s001_order-service_0dcdef41",
   "error": "Connection refused: getsockopt",
   "retryCount": 0,
   "timestamp": 1724352000000
@@ -55,10 +56,13 @@ DLQ topic 中的消息为 JSON 格式的 `DlqMessage`:
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `original` | string | 原始 AggResult 的 JSON 字符串(可直接作为 Stream Load body) |
+| `table` | string | 目标 StarRocks 表名(重放工具据此路由到对应表;sysid 分表模式下为 `metrics_<sysid>_5m`) |
 | `label` | string | 原始 Stream Load label(重放时复用,保证幂等去重) |
 | `error` | string | 首次失败原因 |
 | `retryCount` | int | 已重试次数(重放工具递增) |
 | `timestamp` | long | 写入 DLQ 的时间(Unix millis) |
+
+> **多表路由**:重放工具必须读取 `table` 字段,按表名分桶攒批,分别写入对应的 StarRocks 表。禁止把不同表的消息混在一个 Stream Load 请求中。
 
 ## 2. 部署准备
 
@@ -91,9 +95,12 @@ kafka-topics.sh --bootstrap-server <city>-kafka-1:9092 \
 # 4. 确认 StarRocks FE 可达
 curl -s http://<starrocks-fe-vip>:8030/api/health
 
-# 5. 确认目标表存在
+# 5. 确认目标表存在(sysid 分表模式下需确认所有 metrics_<sysid>_5m 表)
 mysql -h <starrocks-fe-vip> -P 9030 -u root -e \
-  "SHOW CREATE TABLE prom.metrics_5m"
+  "SHOW CREATE TABLE observability.metrics_5m"
+# sysid 分表模式:
+# mysql -h <starrocks-fe-vip> -P 9030 -u root -e \
+#   "SHOW CREATE TABLE observability.metrics_s001_5m"
 ```
 
 ### 2.3 创建目录
@@ -111,6 +118,16 @@ sudo chown -R bdops:bdops /appdata/dlq-replayer /applog/dlq-replayer
 
 DLQ 重放工具与 Flink 作业共用同一 Maven 工程,复用 `StarRocksStreamLoadClient` 和 `DlqMessage` 类。
 
+**源码位置:**
+| 类 | 路径 | 职责 |
+|---|---|---|
+| `DlqReplayer` | `src/main/java/com/lynnyq/promgw/dlq/DlqReplayer.java` | 主入口:Kafka 消费 + 按表分桶 + 攒批 + Stream Load + 重试退避 |
+| `DlqReplayerConfig` | `src/main/java/com/lynnyq/promgw/dlq/DlqReplayerConfig.java` | properties 配置加载与校验 |
+| `DlqMessage` | `src/main/java/com/lynnyq/promgw/dlq/DlqMessage.java` | DLQ 消息结构(含 table 字段) |
+| `StarRocksStreamLoadClient` | `src/main/java/com/lynnyq/promgw/sink/StarRocksStreamLoadClient.java` | Stream Load HTTP 客户端(复用) |
+
+**测试:** `src/test/java/com/lynnyq/promgw/dlq/DlqReplayerTest.java`(11 个用例,覆盖表路由、JSON 拼接、退避计算、重试/毒丸)
+
 ```bash
 # 在开发机上编译
 cd /Users/yangqian/go/src/github.com/lynnyq/prom-gw/examples/flink-agg5m-starrocks
@@ -126,9 +143,25 @@ ls -la target/flink-agg5m-starrocks-1.0.0.jar
 # 拷贝到每城部署节点
 scp target/flink-agg5m-starrocks-1.0.0.jar \
   bdops@<dlq-replayer-host>:/appdata/dlq-replayer/lib/
-
-# 部署依赖 JAR(若使用独立 main 类,需打 fat jar;此处复用 Flink 工程 fat jar)
 ```
+
+### 3.2.1 运行方式
+
+DLQ 重放工具通过 `java -cp` 指定 main class 运行(与 Flink 作业共用 fat jar,不启动 Flink 集群):
+
+```bash
+# 前台运行(调试用)
+java -cp /appdata/dlq-replayer/lib/flink-agg5m-starrocks-1.0.0.jar \
+  com.lynnyq.promgw.dlq.DlqReplayer \
+  /appdata/dlq-replayer/conf/dlq-replayer.properties
+
+# 后台运行(生产用 systemd,见 §4)
+```
+
+**进程特性:**
+- 单线程消费(Kafka partition 也只需 1,避免 label 竞争)
+- 优雅停止:收到 SIGTERM 后完成当前 poll 批次的 flush 再退出
+- 不依赖 Flink 集群,纯 Java 进程
 
 ### 3.3 部署配置文件
 
@@ -150,7 +183,9 @@ kafka.session.timeout.ms=30000
 # ====== StarRocks 配置 ======
 starrocks.fe.host=<beijing-fe-vip>
 starrocks.fe.port=8030
-starrocks.db=prom
+starrocks.db=observability
+# 单表模式(非 sysid 分表)下写入的固定表名;
+# sysid 分表模式下重放工具优先使用 DLQ 消息中的 table 字段,此值仅作 fallback。
 starrocks.table=metrics_5m
 starrocks.user=root
 starrocks.password=
@@ -189,6 +224,114 @@ log.level=INFO
 log.dir=/applog/dlq-replayer
 log.max.size.mb=200
 log.max.history=30
+```
+
+> **配置说明(DLQ 修复后)**:
+> - DLQ 消息现已携带 `table` 字段(目标 StarRocks 表名),重放工具据此按表分桶写入
+> - `starrocks.table` 仅作 **fallback**:当 DLQ 消息中 `table` 字段为空时使用(兼容旧版消息)
+> - sysid 分表模式下,无需为每个 sysid 单独配置表名,重放工具自动从消息中读取
+> - DLQ topic 不按 sysid 拆分,统一使用 `prom.<city>.dlq.sr.5m`
+
+### 3.4 sysid 分表模式配置示例
+
+当 Flink 作业使用 `--sysid-table-mapping` 按 sysid 分表写入时,DLQ 重放工具使用**同一套配置**即可,无需为每个 sysid 单独配置:
+
+```properties
+# 北京 - sysid 分表模式
+city=bj
+
+kafka.bootstrap.servers=bj-kafka-1:9092,bj-kafka-2:9092,bj-kafka-3:9092
+kafka.dlq.topic=prom.bj.dlq.sr.5m
+kafka.consumer.group.id=dlq-replayer-bj
+kafka.auto.offset.reset=earliest
+kafka.enable.auto.commit=false
+kafka.max.poll.records=500
+
+starrocks.fe.host=<beijing-fe-vip>
+starrocks.fe.port=8030
+starrocks.db=observability
+# fallback:仅用于旧版无 table 字段的 DLQ 消息;sysid 分表模式下消息自带 table
+starrocks.table=metrics_default_5m
+starrocks.user=root
+starrocks.password=
+starrocks.gzip=true
+
+replay.max.retry=5
+replay.backoff.base.ms=10000
+replay.backoff.max.ms=300000
+replay.backoff.multiplier=2.0
+
+batch.size=100
+batch.wait.ms=5000
+
+http.connect.timeout.ms=60000
+http.socket.timeout.ms=60000
+
+alert.enabled=true
+alert.webhook=http://<alertmanager>:9093/api/v2/alerts
+alert.interval.ms=300000
+
+log.level=INFO
+log.dir=/applog/dlq-replayer
+log.max.size.mb=200
+log.max.history=30
+```
+
+### 3.4.1 配置参数对照表
+
+| properties key | 环境变量(systemd) | 默认值 | 说明 |
+|---|---|---|---|
+| `kafka.bootstrap.servers` | `DLQ_KAFKA_BROKERS` | (必填) | Kafka broker 地址 |
+| `kafka.dlq.topic` | `DLQ_KAFKA_TOPIC` | (必填) | DLQ topic 名 |
+| `kafka.consumer.group.id` | `DLQ_KAFKA_GROUP_ID` | (必填) | 消费者组 ID |
+| `kafka.auto.offset.reset` | `DLQ_KAFKA_AUTO_OFFSET_RESET` | `earliest` | 无 offset 时的起始位置 |
+| `kafka.enable.auto.commit` | `DLQ_KAFKA_ENABLE_AUTO_COMMIT` | `false` | 自动提交 offset(建议 false,手动提交保证 at-least-once) |
+| `kafka.max.poll.records` | `DLQ_KAFKA_MAX_POLL_RECORDS` | `500` | 单次 poll 最大拉取条数 |
+| `kafka.session.timeout.ms` | `DLQ_KAFKA_SESSION_TIMEOUT_MS` | `30000` | 会话超时(ms) |
+| `starrocks.fe.host` | `DLQ_SR_HOST` | (必填) | StarRocks FE VIP |
+| `starrocks.fe.port` | `DLQ_SR_PORT` | `8030` | FE HTTP 端口 |
+| `starrocks.db` | `DLQ_SR_DB` | (必填) | 数据库名(observability) |
+| `starrocks.table` | `DLQ_SR_TABLE` | (必填) | fallback 表名(消息无 table 字段时使用) |
+| `starrocks.user` | `DLQ_SR_USER` | `root` | 用户名 |
+| `starrocks.password` | `DLQ_SR_PASSWORD` | (空) | 密码 |
+| `starrocks.gzip` | `DLQ_SR_GZIP` | `true` | Stream Load 是否 gzip 压缩 |
+| `replay.max.retry` | `DLQ_MAX_RETRY` | `5` | 最大重试次数(不含首次) |
+| `replay.backoff.base.ms` | `DLQ_BACKOFF_BASE_MS` | `10000` | 退避初始间隔(ms) |
+| `replay.backoff.max.ms` | `DLQ_BACKOFF_MAX_MS` | `300000` | 退避最大间隔(ms) |
+| `replay.backoff.multiplier` | `DLQ_BACKOFF_MULTIPLIER` | `2.0` | 退避倍数 |
+| `batch.size` | `DLQ_BATCH_SIZE` | `100` | 攒批行数上限 |
+| `batch.wait.ms` | `DLQ_BATCH_WAIT_MS` | `5000` | 攒批最大等待时间(ms) |
+| `http.connect.timeout.ms` | `DLQ_HTTP_CONNECT_TIMEOUT_MS` | `60000` | HTTP 连接超时(ms) |
+| `http.socket.timeout.ms` | `DLQ_HTTP_SOCKET_TIMEOUT_MS` | `60000` | HTTP 读超时(ms) |
+| `alert.enabled` | `DLQ_ALERT_ENABLED` | `true` | 是否启用毒丸告警 |
+| `alert.webhook` | `DLQ_ALERT_WEBHOOK` | (空) | 告警 webhook 地址 |
+| `alert.interval.ms` | `DLQ_ALERT_INTERVAL_MS` | `300000` | 告警最小间隔(ms) |
+
+> **优先级**:环境变量(systemd EnvironmentFile) > properties 文件 > 默认值。
+> 每城只需通过 `dlq-replayer.<city>.env` 覆盖城市特定配置(Kafka/SR 地址等),公共默认值放在 properties 文件中。
+
+### 3.4.2 重放工具按表分桶逻辑(实现要点)
+
+```java
+// 1. 消费 DLQ 消息,反序列化为 DlqMessage
+DlqMessage msg = mapper.readValue(record.value(), DlqMessage.class);
+
+// 2. 读取目标表名(优先用消息中的 table,fallback 到配置)
+String table = (msg.getTable() != null && !msg.getTable().isEmpty())
+        ? msg.getTable()
+        : config.getProperty("starrocks.table");
+
+// 3. 按表分桶攒批
+bufferMap.computeIfAbsent(table, k -> new ArrayList<>()).add(msg);
+
+// 4. 攒批满或超时 → 按表独立 Stream Load
+for (Map.Entry<String, List<DlqMessage>> entry : bufferMap.entrySet()) {
+    String tbl = entry.getKey();
+    List<DlqMessage> msgs = entry.getValue();
+    String url = String.format("http://%s:%d/api/%s/%s/_stream_load",
+            srHost, srPort, srDb, tbl);
+    // ... 发送 Stream Load,URL 中的表名 = tbl
+}
 ```
 
 ## 4. systemd 服务配置
@@ -309,7 +452,8 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-bj
 # StarRocks Stream Load 目标
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
-DLQ_SR_DB=prom
+DLQ_SR_DB=observability
+# fallback 表名:DLQ 消息中 table 字段为空时使用;sysid 分表模式下消息自带 table
 DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
@@ -354,7 +498,8 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-sz
 # StarRocks Stream Load 目标(北京 FE VIP,走跨城专线)
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
-DLQ_SR_DB=prom
+DLQ_SR_DB=observability
+# fallback 表名:DLQ 消息中 table 字段为空时使用;sysid 分表模式下消息自带 table
 DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
@@ -399,7 +544,8 @@ DLQ_KAFKA_GROUP_ID=dlq-replayer-hf
 # StarRocks Stream Load 目标(北京 FE VIP,走跨城专线)
 DLQ_SR_HOST=<beijing-fe-vip>
 DLQ_SR_PORT=8030
-DLQ_SR_DB=prom
+DLQ_SR_DB=observability
+# fallback 表名:DLQ 消息中 table 字段为空时使用;sysid 分表模式下消息自带 table
 DLQ_SR_TABLE=metrics_5m
 DLQ_SR_USER=root
 DLQ_SR_PASSWORD=
@@ -476,26 +622,35 @@ journalctl -u dlq-replayer@bj -f
 
 ### 5.1 消费与重放流程
 
+> 对应源码:`DlqReplayer.run()` / `flushBuffer()`
+
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │ 主循环 (单线程)                                                  │
 │                                                                  │
 │  while (running):                                                │
-│    1. Consumer.poll(5000)  → 拉取最多 500 条 DLQ 消息            │
-│    2. 遍历消息,反序列化为 DlqMessage                             │
-│    3. 检查 retryCount,若超过 maxRetry → 发送告警,跳过           │
-│    4. 将 original(JSON)加入当前批次 buffer                       │
-│    5. 若 buffer 满(100 条)或超时(5s)→ 触发 Stream Load       │
-│    6. Stream Load:                                               │
-│       - 构建 batch JSON: [original1, original2, ...]            │
-│       - HTTP PUT → FE:8030/api/prom/metrics_5m/_stream_load│
-│       - Label: dlq_replay_<原label>  (复用原 label 保证幂等)    │
-│       - 失败 → 指数退避重试(10s/30s/60s/120s/300s)              │
-│    7. 成功 → consumer.commitSync()  (提交 offset)               │
-│    8. 失败(超过 maxRetry)→ 记录 error 日志 + 告警,提交 offset  │
-│       (避免毒丸消息阻塞整个队列)                                  │
+│    1. consumer.poll(5000ms)  → 拉取 DLQ 消息                     │
+│    2. 若 poll 空 → flushAllBuffersIfTimeout(距上次 flush > 5s)   │
+│       → continue(避免小批量数据滞留)                              │
+│    3. 遍历消息:                                                  │
+│       - 反序列化为 DlqMessage(失败 → 跳过毒丸)                   │
+│       - resolveTable(msg): 优先 msg.table,fallback 配置表名     │
+│       - 按表分桶:bufferMap[table].add(msg)                       │
+│    4. flushFullBuffers(): 对所有 size ≥ batch.size 的表 flush    │
+│    5. consumer.commitSync()  → 提交 offset(at-least-once)        │
+│                                                                  │
+│  flushBuffer(table, buf):                                        │
+│    label = buf[0].label  (复用原 label,StarRocks 幂等)          │
+│    json  = [orig1, orig2, ...]  (strip_outer_array=true)         │
+│    for attempt in 0..maxRetry:                                   │
+│      client.load(label, json, gzip)                              │
+│        → 成功: buf.clear(), return                               │
+│        → 失败: sleep(backoff.base * mult^attempt, cap max)      │
+│    超过 maxRetry → 告警 + buf.clear() (毒丸批次,不阻塞队列)      │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+> **按表分桶是强制要求**:sysid 分表模式下,Stream Load URL 路径包含表名,必须按 `msg.table` 分桶后分别写入。混表写入会导致 StarRocks 报错或数据错位。每个 table 对应一个缓存的 `StarRocksStreamLoadClient` 实例。
 
 ### 5.2 幂等去重机制
 
@@ -529,21 +684,25 @@ put.setEntity(new ByteArrayEntity(batchJsonBytes));
 单条 Stream Load 的 HTTP 开销较大(连接 + 307 重定向 + BE 处理),因此攒批提交:
 
 ```
-批次触发条件(任一满足即触发):
-  1. 消息数 ≥ batch.size (100 条)
-  2. 等待时间 ≥ batch.wait.ms (5 秒)
+按表分桶:每条消息根据 msg.table 归入 buffer[table]
 
-批次构建:
+批次触发条件(任一满足即触发,按表独立判断):
+  1. 某 table 的 buffer 消息数 ≥ batch.size (100 条)
+  2. 全局等待时间 ≥ batch.wait.ms (5 秒) → flush 所有非空 buffer
+
+批次构建(每个 table 独立):
   [
     {original_msg_1 的 AggResult JSON},
     {original_msg_2 的 AggResult JSON},
     ...
   ]
   → strip_outer_array=true,StarRocks 自动拆分为多行
+  → PUT /api/observability/<table>/_stream_load
 ```
 
 - 批量 label:使用第一条消息的 label 作为 batch label
 - 若 batch 中部分消息 label 相同,StarRocks 自动去重
+- **不同 table 的消息绝不混批**:Stream Load URL 含表名,混批会导致写入错误表
 
 ## 6. 监控与告警
 

@@ -25,11 +25,11 @@ class MetricAggFunctionTest {
 
         // 加入 3 个 sample
         agg.add(new SampleWithMeta("biz1", "up", labels, 1.0, 1000L,
-                "dc1", "bj", "dc1", 0L, ""), acc);
+                "dc1", "bj", "dc1", 0L, "", "s001"), acc);
         agg.add(new SampleWithMeta("biz1", "up", labels, 2.0, 2000L,
-                "dc1", "bj", "dc1", 0L, ""), acc);
+                "dc1", "bj", "dc1", 0L, "", "s001"), acc);
         agg.add(new SampleWithMeta("biz1", "up", labels, 3.0, 3000L,
-                "dc1", "bj", "dc1", 0L, ""), acc);
+                "dc1", "bj", "dc1", 0L, "", "s001"), acc);
 
         MetricAggState result = agg.getResult(acc);
 
@@ -76,11 +76,11 @@ class MetricAggFunctionTest {
         labels.put("job", "prom");
 
         MetricAggState a = agg.createAccumulator();
-        agg.add(new SampleWithMeta("biz1", "up", labels, 1.0, 1000L, "dc1", "bj", "dc1", 0L, ""), a);
-        agg.add(new SampleWithMeta("biz1", "up", labels, 2.0, 2000L, "dc1", "bj", "dc1", 0L, ""), a);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 1.0, 1000L, "dc1", "bj", "dc1", 0L, "", "s001"), a);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 2.0, 2000L, "dc1", "bj", "dc1", 0L, "", "s001"), a);
 
         MetricAggState b = agg.createAccumulator();
-        agg.add(new SampleWithMeta("biz1", "up", labels, 3.0, 3000L, "dc1", "bj", "dc1", 0L, ""), b);
+        agg.add(new SampleWithMeta("biz1", "up", labels, 3.0, 3000L, "dc1", "bj", "dc1", 0L, "", "s001"), b);
 
         MetricAggState merged = agg.merge(a, b);
 

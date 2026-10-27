@@ -98,7 +98,7 @@ class KafkaDlqHandlerSerializationTest {
         // 复现生产报错:StarRocksSink 持有 DlqHandler 字段,Sink 闭包需可序列化
         DlqHandler dlqHandler = new KafkaDlqHandler("broker:9092", "prom.dlq");
         StarRocksSink sink = new StarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", dlqHandler);
 
         // 这正是 Flink ClosureCleaner 调用的序列化路径
@@ -110,7 +110,7 @@ class KafkaDlqHandlerSerializationTest {
     void testStarRocksSinkWithoutDlqHandlerIsSerializable() throws Exception {
         // dlqHandler = null 场景也需可序列化
         StarRocksSink sink = new StarRocksSink(
-                "fe", 8030, "prom", "metrics_5m",
+                "fe", 8030, "observability", "metrics_5m",
                 "root", "", true, "local_5m", null);
 
         byte[] bytes = InstantiationUtil.serializeObject(sink);

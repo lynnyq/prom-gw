@@ -486,56 +486,191 @@ scp target/flink-agg5m-starrocks-1.0.0.jar jm-1:/appdata/flink/jobs/
 
 ### 6.3 提交作业
 
+#### 6.3.1 标准提交命令(北京示例)
+
 ```bash
-# 通过 CLI 提交
 /appdata/flink/bin/flink run \
-  -d \                                  # detached 模式(提交后不等待)
-  -p 24 \                               # 全局并行度(= Kafka partition 数)
-  -c com.example.promgw.Agg5mJob \
+  -d \
+  -p 24 \
+  -c com.lynnyq.promgw.Agg5mJob \
   /appdata/flink/jobs/flink-agg5m-starrocks-1.0.0.jar \
   --env prod \
-  --city sz \
-  --kafka-brokers kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094 \
-  --topic prom.sz.routed.app_business \
-  --group-id flink-agg5m-sz-app-business \
+  --kafka-brokers kafka-1.bj:9094,kafka-2.bj:9094,kafka-3.bj:9094 \
+  --topic prom.bj.routed.app_business \
+  --group-id flink-agg5m-bj-app-business \
+  --kafka-start-from committed \
+  --kafka-offset-reset latest \
   --starrocks-host <beijing-fe-vip> \
   --starrocks-port 8030 \
-  --starrocks-db prom \
+  --starrocks-db observability \
   --starrocks-table metrics_5m \
   --starrocks-user root \
   --starrocks-password "" \
-  --label-prefix sz_5m \
-  --dlq-topic prom.sz.dlq.sr.5m \
+  --label-prefix bj_5m \
+  --dlq-topic prom.bj.dlq.sr.5m \
   --dlq-enabled true \
   --sr-batch-size 500 \
   --sr-batch-interval-ms 10000 \
   --source-parallelism 24 \
   --agg-parallelism 24 \
   --window-minutes 5 \
-  --checkpoint-path hdfs:///flink/checkpoints/agg5m-sz \
+  --checkpoint-path hdfs:///flink/checkpoints/agg5m-bj \
   --checkpoint-interval-ms 60000 \
-  --allowed-lateness-ms 30000
+  --allowed-lateness-ms 30000 \
+  --watermark-idleness-ms 60000
 ```
+
+**命令参数说明**:
+
+| 参数块 | 参数 | 值 | 说明 |
+|---|---|---|---|
+| **Flink CLI** | `-d` | - | detached 模式,提交后立即返回 |
+| | `-p` | `24` | 全局并行度,必须 = topic partition 数(64 分区场景可提至 64) |
+| | `-c` | `com.lynnyq.promgw.Agg5mJob` | Main Class,包名已从 `com.example.promgw` 改为 `com.lynnyq.promgw` |
+| **基础** | `--env` | `prod` | 开启 SASL_SSL + SCRAM-SHA-512 + gzip + hdfs checkpoint 预设 |
+| **Kafka** | `--kafka-brokers` | `kafka-1.bj:9094,...` | 本城 Kafka broker 列表,9094 是 SASL_SSL 端口 |
+| | `--topic` | `prom.bj.routed.app_business` | 消费的 routed topic,四路由 topic 之一 |
+| | `--group-id` | `flink-agg5m-bj-app-business` | consumer group,每城每业务唯一 |
+| **Offset** | `--kafka-start-from` | `committed` | 从已提交位点继续消费。首次部署可用 `latest`/`earliest`/`timestamp`,见 §6.3.2 |
+| | `--kafka-offset-reset` | `latest` | 无已提交位点时的回退策略 |
+| **StarRocks** | `--starrocks-host` | `<beijing-fe-vip>` | FE VIP,Stream Load 直连 FE,FE 自动 307 到 BE |
+| | `--starrocks-port` | `8030` | FE HTTP 端口,StarRocks 无独立 Stream Load 端口 |
+| | `--label-prefix` | `bj_5m` | Stream Load Label 前缀,每城必须唯一防冲突 |
+| **DLQ** | `--dlq-topic` | `prom.bj.dlq.sr.5m` | StarRocks 写入失败时的死信 topic |
+| | `--dlq-enabled` | `true` | 关闭后写入失败直接抛异常,作业会重启 |
+| **攒批** | `--sr-batch-size` | `500` | 攒批行数,达到即 flush HTTP 请求 |
+| | `--sr-batch-interval-ms` | `10000` | 攒批时间上限,超时强制 flush |
+| **并行度** | `--source-parallelism` | `24` | Kafka Source 并行度,**必须 = topic partition 数** |
+| | `--agg-parallelism` | `24` | 窗口聚合并行度,建议 = source 并行度避免 shuffle |
+| **窗口** | `--window-minutes` | `5` | tumbling event-time 窗口大小,不要改 |
+| | `--allowed-lateness-ms` | `30000` | 允许的事件时间乱序 |
+| | `--watermark-idleness-ms` | `60000` | subtask 空闲超时后标记 idle,防止卡死全局 watermark |
+| **容错** | `--checkpoint-path` | `hdfs:///flink/checkpoints/agg5m-bj` | Checkpoint 存储路径 |
+| | `--checkpoint-interval-ms` | `60000` | Checkpoint 间隔,默认 60s |
+
+#### 6.3.2 按 sysid 分表提交(S 系统多租户)
+
+当 prom-gw 按 sysid 将数据路由到不同 Kafka topic,且需要按 sysid 写入不同 StarRocks 表时,使用多 topic 消费 + sysid-table-mapping:
+
+```bash
+/appdata/flink/bin/flink run \
+  -d \
+  -p 24 \
+  -c com.lynnyq.promgw.Agg5mJob \
+  /appdata/flink/jobs/flink-agg5m-starrocks-1.0.0.jar \
+  --env prod \
+  --kafka-brokers kafka-1.bj:9094,kafka-2.bj:9094,kafka-3.bj:9094 \
+  --topics prom.bj.routed.s001,prom.bj.routed.s002,prom.bj.routed.default \
+  --group-id flink-agg5m-bj-systems \
+  --kafka-start-from committed \
+  --kafka-offset-reset latest \
+  --starrocks-host <beijing-fe-vip> \
+  --starrocks-port 8030 \
+  --starrocks-db observability \
+  --sysid-table-mapping "s001=metrics_s001_5m,s002=metrics_s002_5m" \
+  --default-table metrics_default_5m \
+  --starrocks-user root \
+  --starrocks-password "" \
+  --label-prefix bj_5m \
+  --dlq-topic prom.bj.dlq.sr.5m \
+  --dlq-enabled true \
+  --sr-batch-size 500 \
+  --sr-batch-interval-ms 10000 \
+  --source-parallelism 24 \
+  --agg-parallelism 24 \
+  --window-minutes 5 \
+  --checkpoint-path hdfs:///flink/checkpoints/agg5m-bj-systems \
+  --checkpoint-interval-ms 60000 \
+  --allowed-lateness-ms 30000 \
+  --watermark-idleness-ms 60000
+```
+
+**sysid 路由参数说明**:
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `--topics` | `prom.bj.routed.s001,prom.bj.routed.s002,prom.bj.routed.default` | 多 topic 消费(逗号分隔),替代单 topic `--topic` |
+| `--sysid-table-mapping` | `s001=metrics_s001_5m,s002=metrics_s002_5m` | sysid → StarRocks 表名映射,逗号分隔多个 `sysid=table` 对 |
+| `--default-table` | `metrics_default_5m` | 兜底表,未在 mapping 中的 sysid 写入此表(不填则丢弃并计数) |
+
+**路由逻辑**:
+- `sysidTableMap` 非空 → 多表模式,每表独立 buffer + 独立 Stream Load client
+- `sysidTableMap` 为空 → 单表模式(向后兼容,写入 `--starrocks-table`)
+- 未知 sysid + 无 `--default-table` → 丢弃,指标 `srUnknownSysidDropRows` 计数
+
+**DLQ 配置说明(sysid 分表模式)**:
+- DLQ topic 仍使用统一的 `prom.<city>.dlq.sr.5m`,**不按 sysid 拆分**
+- 每条 DLQ 消息携带 `table` 字段(目标 StarRocks 表名,如 `metrics_s001_5m`)
+- DLQ 重放工具按 `table` 字段分桶,分别写入对应表,无需为每个 sysid 单独部署重放进程
+- 详见 [DLQ 重放工具部署文档](14-dlq-replayer-deployment.md) §3.4 sysid 分表模式配置
+
+**新增 S 系统配置步骤**(无需改代码):
+1. prom-gw `rules.yaml` 追加 `sysid` 匹配规则 → 新 topic
+2. Kafka 预创建 `prom.<city>.routed.<sysid>` topic
+3. StarRocks 建表 `metrics_<sysid>_5m`(Flink 实时写入)+ `metrics_<sysid>_1h` + `metrics_<sysid>_1d`(级联聚合),并创建 `agg_5m_to_1h_<sysid>`、`agg_1h_to_1d_<sysid>` 两个周期任务
+4. Flink 重启,`--topics` 追加新 topic,`--sysid-table-mapping` 追加 `sysid=table`
+
+#### 6.3.3 Kafka Offset 起始策略详解
+
+Flink Kafka Source 支持 4 种起始位点策略,通过 `--kafka-start-from` 指定:
+
+| 策略 | 说明 | 典型场景 |
+|---|---|---|
+| `committed`(默认) | 从 consumer group 已提交位点继续消费 | **日常运行/故障恢复**,精确衔接上次消费位置 |
+| `earliest` | 从 topic 最早可用消息开始消费 | **补数据/重跑全量**,如 Kafka 数据保留 7 天,从 7 天前开始 |
+| `latest` | 从 topic 最新位置开始消费(跳过历史) | **首次部署不回溯历史**,只消费新写入的数据 |
+| `timestamp` | 从指定时间戳之后的第一条消息开始消费 | **定点补数据**,如从 "2026-09-01 08:00:00" 之后开始回放 |
+
+**`committed` 策略的补充参数**:当 consumer group 没有任何已提交位点(首次启动或位点过期)时,`--kafka-offset-reset` 决定回退行为:
+
+| 值 | 说明 | 生产建议 |
+|---|---|---|
+| `latest`(默认) | 无位点时从最新位置开始,跳过历史数据 | 新 group 首次启动,不回溯历史 |
+| `earliest` | 无位点时从最早位置开始,消费全量历史 | 新 group 需要补数据 |
+| `none` | 无位点时直接抛异常,作业启动失败 | 强校验场景,确保不丢数据也不重复 |
+
+**`timestamp` 策略的补充参数**:
+
+```bash
+# 从 2026-09-01 00:00:00(北京时间)之后的第一条消息开始消费
+--kafka-start-from timestamp \
+--kafka-start-timestamp 1756656000000
+```
+
+> **⚠️ 重要**:`kafka-start-from` 只在 **首次部署** 或 **显式覆盖位点** 时生效。如果通过 Savepoint 恢复(`flink run -s ...`),Flink 会忽略此参数,直接从 Savepoint 中保存的位点继续消费。
+
+**常见场景的 Offset 配置**:
+
+| 场景 | `kafka-start-from` | `kafka-offset-reset` | 说明 |
+|---|---|---|---|
+| 首次部署,不回溯历史 | `committed` | `latest` | 生产默认配置 |
+| 首次部署,需要补历史数据 | `committed` | `earliest` | 消费 topic 中全部存量消息 |
+| 从指定时间点补数据 | `timestamp` | - | 配合 `kafka-start-timestamp` |
+| 故障恢复(Savepoint) | 任意 | 任意 | **被忽略**,Savepoint 位点优先 |
+| 临时跳过堆积消息 | `latest` | - | 丢弃历史,只消费实时 |
 
 ### 6.4 参数模板(各城)
 
 | 参数 | 深圳 | 合肥 | 北京 |
 |---|---|---|---|
-| `--city` | `sz` | `hf` | `bj` |
 | `--kafka-brokers` | `kafka-1.sz:9094,...` | `kafka-1.hf:9094,...` | `kafka-1.bj:9094,...` |
 | `--topic` | `prom.sz.routed.app_business` | `prom.hf.routed.app_business` | `prom.bj.routed.app_business` |
 | `--group-id` | `flink-agg5m-sz-app-business` | `flink-agg5m-hf-app-business` | `flink-agg5m-bj-app-business` |
+| `--kafka-start-from` | `committed` | `committed` | `committed` |
+| `--kafka-offset-reset` | `latest` | `latest` | `latest` |
 | `--starrocks-host` | `<beijing-fe-vip>` | `<beijing-fe-vip>` | `<beijing-fe-vip>` |
 | `--label-prefix` | `sz_5m` | `hf_5m` | `bj_5m` |
 | `--dlq-topic` | `prom.sz.dlq.sr.5m` | `prom.hf.dlq.sr.5m` | `prom.bj.dlq.sr.5m` |
 | `-p` (并行度) | 24 | 8 | 24 |
+
+> **S 系统多租户场景**:上表为单 topic(app_business)场景的参数模板。按 sysid 分表时,使用 `--topics`(多 topic)、`--sysid-table-mapping`、`--default-table` 替代 `--topic` 和 `--starrocks-table`,详见 §6.3.2。
 
 ### 6.5 通过 Web UI 提交
 
 1. 访问 `http://jm-1:8081`
 2. 左侧菜单 → "Submit new Job"
 3. 上传 JAR 文件
-4. 填入 Main Class: `com.example.promgw.Agg5mJob`
+4. 填入 Main Class: `com.lynnyq.promgw.Agg5mJob`
 5. 填入 Program Arguments(同 §6.3 的参数)
 6. 设置 Parallelism: 24
 7. 点击 "Submit"
@@ -557,9 +692,9 @@ scp target/flink-agg5m-starrocks-1.0.0.jar jm-1:/appdata/flink/jobs/
 
 # 从 Savepoint 恢复
 /appdata/flink/bin/flink run -s hdfs:///flink/savepoints/savepoint-xxxxx -d -p 24 \
-  -c com.example.promgw.Agg5mJob \
+  -c com.lynnyq.promgw.Agg5mJob \
   /appdata/flink/jobs/flink-agg5m-starrocks-1.0.0.jar \
-  --env prod --city sz ...
+  --env prod ...
 ```
 
 ---
@@ -597,8 +732,8 @@ Savepoint 是手动触发的全量状态快照,用于升级、迁移:
 
 # 从 Savepoint 恢复
 /appdata/flink/bin/flink run -s hdfs:///flink/savepoints/savepoint-xxxxx \
-  -d -p 24 -c com.example.promgw.Agg5mJob \
-  /appdata/flink/jobs/flink-agg5m-starrocks-1.0.0.jar --env prod --city sz ...
+  -d -p 24 -c com.lynnyq.promgw.Agg5mJob \
+  /appdata/flink/jobs/flink-agg5m-starrocks-1.0.0.jar --env prod ...
 
 # 删除 Savepoint
 /appdata/flink/bin/flink savepoint -d hdfs:///flink/savepoints/savepoint-xxxxx
@@ -629,9 +764,9 @@ scp target/flink-agg5m-starrocks-1.1.0.jar jm-1:/appdata/flink/jobs/
 
 # 3. 从 Savepoint 恢复
 /appdata/flink/bin/flink run -s ${SAVEPOINT_PATH} \
-  -d -p 24 -c com.example.promgw.Agg5mJob \
+  -d -p 24 -c com.lynnyq.promgw.Agg5mJob \
   /appdata/flink/jobs/flink-agg5m-starrocks-1.1.0.jar \
-  --env prod --city sz ...
+  --env prod ...
 
 # 4. 验证作业正常运行
 curl -s http://jm-1:8081/jobs/overview | python3 -m json.tool
@@ -700,6 +835,7 @@ scrape_configs:
 | SR 批量 flush 成功 | `flink_taskmanager_job_task_promgw_srFlushSuccess` | - |
 | SR 批量 flush 失败 | `flink_taskmanager_job_task_promgw_srFlushFailure` | > 0 |
 | SR DLQ 行数 | `flink_taskmanager_job_task_promgw_srDlqRows` | > 0 告警 |
+| SR 未知 sysid 丢弃行数 | `flink_taskmanager_job_task_promgw_srUnknownSysidDropRows` | > 0 告警(多表模式下 sysid 未配置 mapping) |
 | Decode 失败 | `flink_taskmanager_job_task_promgw_decodeFailures` | > 0 告警 |
 
 ### 8.4 告警规则
@@ -845,12 +981,15 @@ taskmanager.network.memory.buffers-per-channel: 4  # 每 channel 缓冲区数
 | 参数 | 默认值 | 调优建议 | 说明 |
 |---|---|---|---|
 | `--window-minutes` | 5 | 不要改 | 5min 是设计要求 |
-| `--allowed-lateness-ms` | 30000 | 10000-60000 | 允许的乱序时间,影响窗口触发延迟 |
+| `--allowed-lateness-ms` | 30000 | 10000-60000 | 允许的事件时间乱序,影响窗口触发延迟 |
+| `--watermark-idleness-ms` | 60000 | 30000-120000 | 空闲 subtask 标记超时,防止卡死全局 watermark |
 | `--checkpoint-interval-ms` | 60000 | 30000-120000 | 太短影响吞吐,太长影响恢复 |
 | `--source-parallelism` | 4 | = partition 数 | 确保 1:1 消费 |
 | `--agg-parallelism` | 4 | = source 并行度 | 避免 shuffle |
 | `--sr-batch-size` | 500 | 200-2000 | 攒批行数上限,达到即 flush。越大 HTTP 请求数越少,但内存占用越高 |
 | `--sr-batch-interval-ms` | 10000 | 5000-30000 | 攒批时间上限(ms),超时即 flush。确保 5min 窗口数据在下次窗口触发前写入 |
+| `--kafka-start-from` | `committed` | 见 §6.3.2 | 起始位点策略,生产默认 `committed` |
+| `--kafka-offset-reset` | `latest` | `latest` / `earliest` | 新 group 无位点时的回退策略 |
 
 ### 9.5 JVM 调优
 
@@ -1005,30 +1144,66 @@ curl -s http://jm-1:8081/jobs/<job-id>/checkpoints | python3 -m json.tool
 
 ### 11.3 命令行参数完整列表
 
+#### 11.3.1 基础配置
+
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--env` | `local` | 环境预设:`local` / `prod` |
-| `--city` | - | 城市标识:`bj` / `sz` / `hf` |
-| `--kafka-brokers` | `localhost:9092` | Kafka broker 地址列表 |
-| `--topic` | `prom.local.routed.app_business` | 消费的 Kafka topic |
-| `--group-id` | `flink-agg5m-local` | Kafka consumer group ID |
-| `--starrocks-host` | `localhost` | StarRocks FE VIP |
-| `--starrocks-port` | `8030` | StarRocks FE HTTP 端口(Stream Load 复用,无 8070) |
-| `--starrocks-db` | `prom` | StarRocks 数据库 |
-| `--starrocks-table` | `metrics_5m` | StarRocks 表名 |
+| `--env` | `local` | 环境预设:`local` / `prod`。`prod` 自动开启 SASL_SSL + SCRAM-SHA-512 + gzip + hdfs checkpoint |
+
+#### 11.3.2 Kafka 消费
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--kafka-brokers` | `localhost:9092` | Kafka broker 地址列表,逗号分隔 |
+| `--topic` | `prom.local.routed.app_business` | 消费的 Kafka topic(单 topic 模式) |
+| `--topics` | (空) | 多 topic 消费,逗号分隔(如 `prom.bj.routed.s001,prom.bj.routed.s002`)。设置后替代 `--topic` |
+| `--group-id` | `flink-agg5m-local` | Kafka consumer group ID,每城唯一 |
+| `--source-parallelism` | `4` | Kafka Source 并行度,**必须 = topic partition 数** |
+
+#### 11.3.3 Kafka Offset 策略
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--kafka-start-from` | `committed` | 起始位点策略:`committed` / `earliest` / `latest` / `timestamp`(见 §6.3.3) |
+| `--kafka-offset-reset` | `latest` | `committed` 策略下无已提交位点时的重置策略:`earliest` / `latest` / `none` |
+| `--kafka-start-timestamp` | `0` | `start-from=timestamp` 时必填,epoch millis(如 `1756656000000`) |
+
+#### 11.3.4 StarRocks 写入
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--starrocks-host` | `localhost` | StarRocks FE VIP(Stream Load 直连 FE,FE 自动 307 redirect 到 BE) |
+| `--starrocks-port` | `8030` | StarRocks FE HTTP 端口(Stream Load 复用,无独立 8070) |
+| `--starrocks-db` | `observability` | StarRocks 数据库名 |
+| `--starrocks-table` | `metrics_5m` | StarRocks 目标表(单表模式,`sysid-table-mapping` 为空时使用) |
+| `--sysid-table-mapping` | (空) | sysid → 表名映射,逗号分隔 `sysid=table` 对(如 `s001=metrics_s001_5m,s002=metrics_s002_5m`)。非空时进入多表模式 |
+| `--default-table` | (空) | 兜底表,未在 mapping 中的 sysid 写入此表;不填则未知 sysid 数据被丢弃并计数 |
 | `--starrocks-user` | `root` | StarRocks 用户名 |
 | `--starrocks-password` | (空) | StarRocks 密码 |
-| `--label-prefix` | `local_5m` | Stream Load label 前缀(每城唯一) |
-| `--dlq-topic` | `prom.local.dlq.sr.5m` | DLQ Kafka topic |
-| `--dlq-enabled` | `true` | 是否启用 DLQ |
-| `--sr-batch-size` | `500` | StarRocks 攒批行数上限,达到即 flush |
-| `--sr-batch-interval-ms` | `10000` | StarRocks 攒批时间上限(ms),超时即 flush |
-| `--source-parallelism` | `4` | Kafka Source 并行度 |
-| `--agg-parallelism` | `4` | 窗口聚合并行度 |
-| `--window-minutes` | `5` | 窗口大小(分钟) |
-| `--checkpoint-path` | `file:///tmp/flink-checkpoints` | Checkpoint 存储路径 |
-| `--checkpoint-interval-ms` | `60000` | Checkpoint 间隔(ms) |
-| `--allowed-lateness-ms` | `30000` | 允许的乱序时间(ms) |
+| `--label-prefix` | `local_5m` | Stream Load Label 前缀,**每城必须唯一**(防 Label 冲突) |
+| `--sr-batch-size` | `500` | 攒批行数上限,达到即 flush(HTTP 请求) |
+| `--sr-batch-interval-ms` | `10000` | 攒批时间上限(ms),超时即 flush(防止窗口触发前积压) |
+
+#### 11.3.5 DLQ 死信队列
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--dlq-enabled` | `true` | 写入 StarRocks 失败时是否投递到 DLQ |
+| `--dlq-bootstrap-servers` | (回落 `kafka-brokers`) | DLQ Kafka broker 地址,为空时复用消费集群 |
+| `--dlq-topic` | `prom.local.dlq.sr.5m` | DLQ topic(每城独立,**不按 sysid 拆分**) |
+
+> **DLQ 消息格式**:每条 DLQ 消息携带 `table` 字段(目标 StarRocks 表名),重放工具据此按表分桶写入对应表。因此 DLQ topic 无需按 sysid 拆分,统一使用 `prom.<city>.dlq.sr.5m` 即可。
+
+#### 11.3.6 Flink 窗口与容错
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--window-minutes` | `5` | tumbling event-time 窗口大小(分钟),**不要修改** |
+| `--agg-parallelism` | `4` | 窗口聚合并行度,建议 = `source-parallelism` 避免 shuffle |
+| `--checkpoint-path` | `file:///tmp/flink-checkpoints` | Checkpoint 存储路径,生产用 `hdfs://` |
+| `--checkpoint-interval-ms` | `60000` | Checkpoint 间隔(ms),默认 60s |
+| `--allowed-lateness-ms` | `30000` | 允许的事件时间乱序(ms),默认 30s |
+| `--watermark-idleness-ms` | `60000` | watermark 空闲检测(ms),subtask 超过该时长无数据则标记 idle |
 
 
 

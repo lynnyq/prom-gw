@@ -23,6 +23,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 ### 3. 生产提交
 
 ```bash
+# 单 topic 单表模式(向后兼容)
 flink run -d -p 24 \
   -c com.lynnyq.promgw.Agg5mJob \
   target/flink-agg5m-starrocks-1.0.0.jar \
@@ -30,9 +31,31 @@ flink run -d -p 24 \
   --kafka-brokers kafka-1.sz:9094,kafka-2.sz:9094,kafka-3.sz:9094 \
   --topic prom.sz.routed.app_business \
   --starrocks-host <beijing-fe-vip> \
+  --starrocks-db observability \
+  --starrocks-table metrics_5m \
   --label-prefix sz_5m \
   --dlq-topic prom.sz.dlq.sr.5m
 ```
+
+**按 sysid 分表模式**(S 系统多租户隔离):
+
+```bash
+# 多 topic 消费 + sysid→table 映射,写入不同 StarRocks 表
+flink run -d -p 24 \
+  -c com.lynnyq.promgw.Agg5mJob \
+  target/flink-agg5m-starrocks-1.0.0.jar \
+  --env prod \
+  --kafka-brokers kafka-1.bj:9094,kafka-2.bj:9094,kafka-3.bj:9094 \
+  --topics prom.bj.routed.s001,prom.bj.routed.s002,prom.bj.routed.default \
+  --sysid-table-mapping "s001=metrics_s001_5m,s002=metrics_s002_5m" \
+  --default-table metrics_default_5m \
+  --starrocks-host <beijing-fe-vip> \
+  --starrocks-db observability \
+  --label-prefix bj_5m \
+  --dlq-topic prom.bj.dlq.sr.5m
+```
+
+> **新增 S 系统**:只需在 prom-gw `rules.yaml` 追加 sysid 路由规则、Kafka 预创建 topic、StarRocks 建表(5m/1h/1d + 级联任务),然后重启 Flink 时在 `--topics` 和 `--sysid-table-mapping` 中追加配置,无需改代码。
 
 ## 测试验证
 
@@ -171,7 +194,7 @@ java -jar target/flink-agg5m-starrocks-1.0.0.jar --env local
 ```
 [main] INFO com.lynnyq.promgw.Agg5mJob - Starting Agg5mJob env=local
 [main] INFO com.lynnyq.promgw.Agg5mJob - Kafka source: brokers=localhost:9092, topic=prom.local.routed.app_business
-[main] INFO com.lynnyq.promgw.Agg5mJob - StarRocks sink: host=localhost:8030, db=prom, table=metrics_5m
+[main] INFO com.lynnyq.promgw.Agg5mJob - StarRocks sink: host=localhost:8030, db=observability, table=metrics_5m
 [flink-...-source] INFO com.lynnyq.promgw.decoder.PromWriteRequestDecoder - decoded 12 samples from 1 WriteRequest
 ```
 
@@ -311,9 +334,14 @@ payload 是 Prometheus 原始字节,不含业务信息。business/source_dc/inge
 |---|---|---|
 | `--env` | 环境(local/prod) | local |
 | `--kafka-brokers` | Kafka broker 列表 | localhost:9092 |
-| `--topic` | 消费的 Kafka topic | prom.local.routed.app_business |
+| `--topic` | 消费的 Kafka topic(单 topic 模式) | prom.local.routed.app_business |
+| `--topics` | 多 topic 消费,逗号分隔(设置后替代 `--topic`) | (空) |
+| `--sysid-table-mapping` | sysid→表名映射,逗号分隔 `sysid=table` 对(非空时进入多表模式) | (空) |
+| `--default-table` | 兜底表,未在 mapping 中的 sysid 写入此表 | (空) |
 | `--starrocks-host` | StarRocks FE VIP | localhost |
 | `--starrocks-port` | FE HTTP 端口(Stream Load 复用) | 8030 |
+| `--starrocks-db` | StarRocks 数据库名 | observability |
+| `--starrocks-table` | StarRocks 目标表(单表模式,`sysid-table-mapping` 为空时使用) | metrics_5m |
 | `--label-prefix` | Stream Load label 前缀 | local_5m |
 | `--window-minutes` | 聚合窗口(分钟) | 5 |
 | `--checkpoint-path` | checkpoint 存储路径 | file:///tmp/flink-checkpoints |

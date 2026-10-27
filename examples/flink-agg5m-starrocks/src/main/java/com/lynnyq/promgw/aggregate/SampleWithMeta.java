@@ -31,6 +31,8 @@ public class SampleWithMeta implements Serializable {
     private String ingestDc;
     private long ingestTimeMs;
     private String traceparent;
+    /** s 系统 ID(从 Prometheus 公共标签 sysid 提取,用于 StarRocks 表路由) */
+    private String sysid;
 
     // Flink POJO 需要无参构造
     public SampleWithMeta() {}
@@ -38,7 +40,7 @@ public class SampleWithMeta implements Serializable {
     public SampleWithMeta(String business, String metric, Map<String, String> labels,
                           double value, long timestampMs,
                           String sourceDc, String ingestCity, String ingestDc,
-                          long ingestTimeMs, String traceparent) {
+                          long ingestTimeMs, String traceparent, String sysid) {
         this.business = business;
         this.metric = metric;
         this.labels = labels;
@@ -49,6 +51,7 @@ public class SampleWithMeta implements Serializable {
         this.ingestDc = ingestDc;
         this.ingestTimeMs = ingestTimeMs;
         this.traceparent = traceparent;
+        this.sysid = sysid;
     }
 
     public String getBusiness() { return business; }
@@ -81,6 +84,9 @@ public class SampleWithMeta implements Serializable {
     public String getTraceparent() { return traceparent; }
     public void setTraceparent(String traceparent) { this.traceparent = traceparent; }
 
+    public String getSysid() { return sysid; }
+    public void setSysid(String sysid) { this.sysid = sysid; }
+
     /**
      * typeInfo 显式声明 SampleWithMeta 的 Flink 序列化器。
      *
@@ -100,6 +106,7 @@ public class SampleWithMeta implements Serializable {
         fields.put("ingestDc", Types.STRING);
         fields.put("ingestTimeMs", Types.LONG);
         fields.put("traceparent", Types.STRING);
+        fields.put("sysid", Types.STRING);
         return Types.POJO(SampleWithMeta.class, fields);
     }
 
