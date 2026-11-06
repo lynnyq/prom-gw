@@ -35,10 +35,10 @@ func (s *stubAuth) Verify(_ context.Context, token string) (auth.Business, error
 	return t, nil
 }
 
-func newTestServer(t *testing.T, h func(context.Context, []byte, []parser.Sample, string) error) *Server {
+func newTestServer(t *testing.T, h func(context.Context, []byte, []parser.Sample) error) *Server {
 	t.Helper()
 	a := &stubAuth{tokens: map[string]auth.Business{
-		"good": {Name: "t1", DefaultTopic: "prom.routed.t1", RateLimit: 100000},
+		"good": {Name: "t1", RateLimit: 100000},
 	}}
 	s, err := New(Config{
 		Authenticator: a,
@@ -119,7 +119,7 @@ func TestMethodNotAllowed(t *testing.T) {
 
 func TestHandler_Invoked(t *testing.T) {
 	var got atomic.Int32
-	s := newTestServer(t, func(_ context.Context, _ []byte, batch []parser.Sample, _ string) error {
+	s := newTestServer(t, func(_ context.Context, _ []byte, batch []parser.Sample) error {
 		got.Add(int32(len(batch)))
 		return nil
 	})
@@ -143,7 +143,7 @@ func TestHandler_Invoked(t *testing.T) {
 }
 
 func TestHandler_Error_Returns503(t *testing.T) {
-	s := newTestServer(t, func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error {
+	s := newTestServer(t, func(_ context.Context, _ []byte, _ []parser.Sample) error {
 		return assert.AnError
 	})
 	w := doRequest(t, s, "good", "application/x-protobuf", "snappy",

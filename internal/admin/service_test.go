@@ -32,7 +32,7 @@ func newSvc(t *testing.T) (*ManagerService, *config.History) {
 		Manager: config.NewManager(config.ManagerConfig{Logger: zap.NewNop(), History: h}),
 		RuleMgr: mgr,
 		Auth: &mockAuth{businesses: []auth.Business{
-			{Name: "app-business", BusinessID: "1001", DefaultTopic: "prom.app", RateLimit: 80000},
+			{Name: "app-business", BusinessID: "1001", RateLimit: 80000},
 		}},
 		History: h,
 		Logger:  zap.NewNop(),

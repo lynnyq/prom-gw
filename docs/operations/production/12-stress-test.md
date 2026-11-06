@@ -279,7 +279,7 @@ make build
 使用 app-business ruleset(含 relabel + route + sample 三个 stage,覆盖典型处理链路):
 
 ```bash
-# 配置文件: configs/rules/app-business.yaml
+# 配置文件: configs/rules/sysid-routing.yaml
 # Token 文件: configs/tokens/local.yaml
 ```
 
@@ -330,7 +330,7 @@ RATE=1000000 DURATION=300s SERIES=100000 bash test/perf/profile.sh
 | `BATCH` | 500 | 每 batch sample 数 |
 | `SERIES` | 10000 | series 池大小 |
 | `GW_BIN` | `./bin/prom-gw` | prom-gw 二进制路径 |
-| `CFG` | `configs/rules/app-business.yaml` | ruleset 配置 |
+| `CFG` | `configs/rules/sysid-routing.yaml` | ruleset 配置 |
 | `TOKENS` | `configs/tokens/local.yaml` | token 配置 |
 | `WAL_DIR` | 随机临时目录 | WAL 数据目录 |
 | `OUT_DIR` | `./perf-out/<timestamp>` | 输出目录 |
@@ -362,7 +362,7 @@ perf-out/20260812-143000/
 ```bash
 # WAL-only 模式(无 Kafka)
 ./bin/prom-gw \
-    --config=configs/rules/app-business.yaml \
+    --config=configs/rules/sysid-routing.yaml \
     --tokens=configs/tokens/local.yaml \
     --wal-dir=/tmp/perf-wal \
     --write-addr=:19201 \
@@ -927,7 +927,7 @@ GOMAXPROCS=8 ./bin/prom-gw ...
 prom-gw 内部 pipeline 使用 channel buffer,大小影响延迟和内存:
 
 ```yaml
-# configs/rules/app-business.yaml
+# configs/rules/sysid-routing.yaml
 global:
   channel_buffer: 65535    # 默认 65535
 ```
@@ -1064,7 +1064,7 @@ kafka-topics.sh --bootstrap-server localhost:9092 \
 # 启动 prom-gw(连接 Kafka)
 KAFKA_BROKERS=localhost:9092 \
 ./bin/prom-gw \
-    --config=configs/rules/app-business.yaml \
+    --config=configs/rules/sysid-routing.yaml \
     --tokens=configs/tokens/local.yaml \
     --wal-dir=/tmp/perf-kafka-wal \
     --source-dc=dc-perf &
@@ -1276,7 +1276,7 @@ echo "WAL drain 速率: ${DRAIN_RATE} bytes/s"
 ```bash
 # 1. 启动 prom-gw + 持续压测(后台)
 ./bin/prom-gw \
-    --config=configs/rules/app-business.yaml \
+    --config=configs/rules/sysid-routing.yaml \
     --tokens=configs/tokens/local.yaml \
     --wal-dir=/tmp/perf-hotreload-wal \
     --source-dc=dc-perf &
@@ -1293,7 +1293,7 @@ LOADGEN_PID=$!
 
 # 3. 压测中途热更新配置(修改 sample rate)
 sleep 60
-cp configs/rules/app-business.yaml /tmp/rules-v2.yaml
+cp configs/rules/sysid-routing.yaml /tmp/rules-v2.yaml
 sed -i 's/rate: 0.1/rate: 0.05/' /tmp/rules-v2.yaml
 
 # 通过 Admin API 热更新
@@ -1307,7 +1307,7 @@ echo "配置已热更新,观察压测是否中断..."
 sleep 60
 curl -X PUT http://127.0.0.1:8082/v1/rulesets/app-business \
     -H "Content-Type: application/yaml" \
-    --data-binary @configs/rules/app-business.yaml
+    --data-binary @configs/rules/sysid-routing.yaml
 
 # 5. 等待压测结束
 wait $LOADGEN_PID
@@ -1418,7 +1418,7 @@ PR 提交
       - name: start prom-gw
         run: |
           ./bin/prom-gw \
-            --config=configs/rules/app-business.yaml \
+            --config=configs/rules/sysid-routing.yaml \
             --tokens=configs/tokens/local.yaml \
             --wal-dir=/tmp/perf-wal \
             --write-addr=:19201 \
@@ -1519,7 +1519,7 @@ echo ">>> 运行性能冒烟测试..."
 make build
 
 ./bin/prom-gw \
-    --config=configs/rules/app-business.yaml \
+    --config=configs/rules/sysid-routing.yaml \
     --tokens=configs/tokens/local.yaml \
     --wal-dir=/tmp/pre-push-wal \
     --source-dc=dc-local > /tmp/prom-gw.log 2>&1 &

@@ -5,65 +5,71 @@
 # 热加载: fsnotify 监听文件变化,自动编译+原子切换
 #
 # 数据流(prom-gw 单进程同步处理):
-#   app-business 租户 → relabel → route → prom.bj.routed.{core,infra,data,app_business}
-#   infra 租户        → relabel          → prom.bj.routed.infra
+#   Prometheus remote_write → relabel → route(按 sysid) → prom.bj.routed.<sysid>
 #
-# topic 规划(写入目标):
-#     - prom.bj.routed.core         (team=core 核心业务)
-#     - prom.bj.routed.infra        (team=infra 基础设施)
-#     - prom.bj.routed.data         (team=data 数据平台)
-#     - prom.bj.routed.app_business (兜底,未命中规则的 app 业务数据)
+# Prometheus 公共标签字段:
+#   - datacenter  机房
+#   - ip          IP 地址
+#   - job         主机类型(pm 物理机 / vm 虚拟机 / pccmt 容器云平台)
+#   - sproject    s 系统名称
+#   - sysid       s 系统 ID 标识字符串(路由维度)
+#
+# topic 规划(写入目标,按 sysid 区分):
+#   - prom.bj.routed.s001   (sysid=s001 的 S 系统)
+#   - prom.bj.routed.s002   (sysid=s002 的 S 系统)
+#   - prom.bj.routed.default(兜底,未命中任何已知 sysid 的数据)
+#
+# 新增 S 系统数据采集:
+#   1. 在下方 stages[].route.rules 中新增一条 match: { sysid: "<新sysid>" } + topic
+#   2. 在 Kafka 中预创建对应 topic: prom.bj.routed.<新sysid>
+#   3. 在 StarRocks 中创建表(参考 deploy/starrocks/init_tables_sysid.sql):
+#        - metrics_<新sysid>_5m (Flink 实时写入)
+#        - metrics_<新sysid>_1h (5m → 1h 级联聚合)
+#        - metrics_<新sysid>_1d (1h → 1d 级联聚合)
+#        - agg_5m_to_1h_<新sysid> / agg_1h_to_1d_<新sysid> 周期任务
+#   4. 在 Flink 作业的 --sysid-table-mapping 中新增 sysid=表名 映射
 # ============================================================
 rulesets:
-  # ── app-business 租户规则集 ──
-  # 收到 remote_write 后同步处理:relabel + route,直接写入 routed topic
-  - name: app-business
-    business: app-business
-    default_topic: prom.bj.routed.app_business   # 路由未命中时的兜底 topic
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.bj.routed.default   # 未命中任何已知 sysid 的兜底 topic;
+                                             # 若需严格过滤(丢弃未知 sysid),把此行改为空串 ""
     version: 1
     match:
-      metric_prefix: ""                         # 空 = 全量接收
+      metric_prefix: ""                     # 空 = 全量接收
     stages:
-      # Stage 1: relabel - 标签清洗
+      # Stage 1: relabel - 标签清洗(可选,按需保留/删除标签)
+      # 注意:不要删除 sysid / sproject / datacenter / ip / job 等公共标签,
+      #       下游 Flink 需要 sysid 做表路由。
       - type: relabel
         drop_labels:
-          - env                                 # 环境标签(噪音)
-          - instance                            # 实例标签(高基数,用 host 替代)
-          - pod                                 # Pod 名(高基数)
-        keep_labels: []                          # 空 = 关闭白名单
+          - env                              # 环境标签(噪音)
+          - instance                         # 实例标签(高基数,用 ip 替代)
+          - pod                              # Pod 名(高基数)
+        keep_labels: []                      # 空 = 关闭白名单
         label_map:
-          kubernetes_io_cluster: cluster         # 重命名: kubernetes_io_cluster → cluster
+          kubernetes_io_cluster: cluster      # 重命名示例
 
-      # Stage 2: route - 按 team 标签分桶到不同 topic
+      # Stage 2: route - 按 sysid 标签分桶到不同 topic
+      # 新增 S 系统只需在此 rules 列表追加一条:
+      #   - match: { sysid: "<新sysid>" }
+      #     topic: prom.bj.routed.<新sysid>
       - type: route
         rules:
-          - match: { team: "core" }              # 核心业务团队(订单/支付/账户)
-            topic: prom.bj.routed.core
-          - match: { team: "infra" }              # 基础设施团队(主机/网络/监控)
-            topic: prom.bj.routed.infra
-          - match: { team: "data" }              # 数据平台团队(离线/实时计算)
-            topic: prom.bj.routed.data
-          # 未命中以上规则 → 写入 default_topic (prom.bj.routed.app_business)
+          - match: { sysid: "s001" }          # S 系统 s001
+            topic: prom.bj.routed.s001
+          - match: { sysid: "s002" }          # S 系统 s002
+            topic: prom.bj.routed.s002
+          # 新增 S 系统示例(取消注释并替换 sysid 即可启用):
+          # - match: { sysid: "s003" }
+          #   topic: prom.bj.routed.s003
+        # 未命中以上规则 → 写入 default_topic (prom.bj.routed.default)
+        # 若 default_topic 为空串,则未命中的 sample 被丢弃(严格过滤模式)
 
-      # Stage 3: sample - 采样(降低下游存储压力)
+      # Stage 3: sample - 采样(降低下游存储压力;生产可按需调整或移除)
       - type: sample
-        rate: 0.1                                # 保留 10%,生产可按需调整
-
-  # ── infra 租户规则集 ──
-  # 基础设施指标通常不按 team 分桶,直接写入 routed.infra
-  - name: infra
-    business: infra
-    default_topic: prom.bj.routed.infra           # 写入的 topic
-    version: 1
-    match:
-      metric_prefix: ""
-    stages:
-      - type: relabel
-        drop_labels:
-          - env
-          - instance
-      # 无 route stage → 全部写入 default_topic (prom.bj.routed.infra)
+        rate: 1.0                             # 1.0 = 全量保留;生产可降到 0.1~0.5
 
 global:
-  rate_limit_per_instance: 100000                # 单实例全局 samples/s 上限
-  channel_buffer: 65535                           # 内部 channel 缓冲区大小
+  rate_limit_per_instance: 100000             # 单实例全局 samples/s 上限
+  channel_buffer: 65535                        # 内部 channel 缓冲区大小

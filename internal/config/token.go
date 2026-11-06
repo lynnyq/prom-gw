@@ -22,10 +22,9 @@ type tokensFile struct {
 }
 
 type tokenEntry struct {
-	Business     string `yaml:"business"`
-	BusinessID   string `yaml:"business_id"`
-	DefaultTopic string `yaml:"default_topic"`
-	RateLimit    int    `yaml:"rate_limit"`
+	Business   string `yaml:"business"`
+	BusinessID string `yaml:"business_id"`
+	RateLimit  int    `yaml:"rate_limit"`
 }
 
 // LocalTokenAuthenticator 本地 token 鉴权器,实现 auth.Authenticator。
@@ -69,17 +68,13 @@ func (a *LocalTokenAuthenticator) Reload(path string) error {
 		if e.Business == "" {
 			return fmt.Errorf("token %q has empty business", token)
 		}
-		if e.DefaultTopic == "" {
-			return fmt.Errorf("token %q has empty default_topic", token)
-		}
 		if e.RateLimit <= 0 {
 			return fmt.Errorf("token %q has invalid rate_limit %d", token, e.RateLimit)
 		}
 		m[token] = auth.Business{
-			Name:         e.Business,
-			DefaultTopic: e.DefaultTopic,
-			BusinessID:   e.BusinessID,
-			RateLimit:    e.RateLimit,
+			Name:       e.Business,
+			BusinessID: e.BusinessID,
+			RateLimit:  e.RateLimit,
 		}
 	}
 	a.tokens.Store(&m)

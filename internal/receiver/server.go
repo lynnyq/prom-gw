@@ -53,12 +53,13 @@ type Config struct {
 	//   - ctx: 含 Meta(business / source_dc / remote_ip / ingest_ts / ingest_city)
 	//   - raw: 原始 prompb.WriteRequest 字节(T1.10 集成测试要求字节级相等)
 	//   - samples: parser 解析后的 samples
-	//   - defaultTopic: 该 token 关联的兜底 topic
 	// 返回:
 	//   - nil: 已入队
 	//   - 其他 error: receiver 映射 503
-	// 注:Meta.IngestTs 单位为纳秒(ns),发送 Kafka header 时 main.go 转 ms(spec 4.3 ingest_time_ms)。
-	Handler func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error
+	// 注:topic 路由完全由 rule engine(ruleset.DefaultTopic + route rules)负责,
+	//   不再由 token 提供 default_topic;Meta.IngestTs 单位为纳秒(ns),
+	//   发送 Kafka header 时 main.go 转 ms(spec 4.3 ingest_time_ms)。
+	Handler func(ctx context.Context, raw []byte, samples []parser.Sample) error
 	// ReadHeaderTimeout HTTP 头读取超时
 	ReadHeaderTimeout time.Duration
 	// MaxBodyBytes 限制请求体大小,默认 16MB
@@ -321,7 +322,7 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request) {
 
 	// 6. handler(由 main 注入: 通常是 rule engine + pipeline.Submit)
 	if s.cfg.Handler != nil {
-		if err := s.cfg.Handler(ctx, body, res.Samples, business.DefaultTopic); err != nil {
+		if err := s.cfg.Handler(ctx, body, res.Samples); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			obs.ErrorsTotal.WithLabelValues("sink", "handler_error", ingestCity, sourceDC).Inc()

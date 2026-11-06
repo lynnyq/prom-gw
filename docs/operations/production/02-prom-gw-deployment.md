@@ -114,11 +114,11 @@ Prometheus
 
 **关键点**:
 - prom-gw **不消费 Kafka**,只写入
-- token 的 `default_topic` 仅作为 `msg.Topic` 初始值,被 ruleset 的 `default_topic` 覆盖
+- **topic 路由完全由 ruleset 负责**(`ruleset.default_topic` + route rules),token 不再配置 topic
+- token 只负责**鉴权**(身份 + 限流),见 `tokens.yaml` → `business` / `rate_limit`
 - ruleset 的 `input_topic` 字段**仅作文档标识,运行期不参与逻辑**(代码注释明确)
-- 实际写入的 topic 由 ruleset 的 `default_topic` + route rules 决定
 - **Fan-out**:一个 Prometheus 批次会被 Manager 按 `match.metric_prefix` 分发给多个 ruleset 并行处理;ruleset 不按 business 过滤,而是按 metric 名前缀匹配
-- **多 topic 输出**:同一 ruleset 内,route stage 可以按不同 label 把 samples 分到不同 topic(如 core/infra/data/app_business),一次 Process 产生多次 `out()` 调用
+- **多 topic 输出**:同一 ruleset 内,route stage 可以按不同 label 把 samples 分到不同 topic(如按 sysid 分桶),一次 Process 产生多次 `out()` 调用
 - **背压链**: receiver → ruleengine → sink.Pipeline(有界 channel 65535) → AdapterSink → Kafka/WAL。任何一层 ErrBackpressure 向上传播 → receiver 返回 503 + Retry-After
 - **Kafka topic 必须预创建**:禁止 auto-create,因为需要 64 分区 3 副本的硬约束
 
@@ -128,35 +128,34 @@ Prometheus
 tokens.yaml                    rules.yaml (ruleset)
 ─────────────                  ─────────────────────────────
 tokens:                        rulesets:
-  "tk_app_business_prod":         - name: app-business
-    default_topic:                  business: app-business
-      prom.bj.routed.app_business   default_topic: prom.bj.routed.app_business
+  "tk_app_business_prod":         - name: sysid-routing
+    business: app-business          business: s-systems
+    business_id: "1001"             default_topic: prom.bj.routed.default
     rate_limit: 80000               stages:
                                       - relabel ...
   "tk_infra_prod":                    - route:
-    default_topic:                      rules:
-      prom.bj.routed.infra               - { team: core,  topic: prom.bj.routed.core }
-    rate_limit: 50000                   - { team: infra, topic: prom.bj.routed.infra }
-                                       - { team: data,  topic: prom.bj.routed.data }
+    business: infra                     rules:
+    business_id: "1002"                   - { sysid: s001, topic: prom.bj.routed.s001 }
+    rate_limit: 50000                     - { sysid: s002, topic: prom.bj.routed.s002 }
+                                       - { sysid: s003, topic: prom.bj.routed.s003 }
 
            │                              │
-           │   token.default_topic         │   ruleset.default_topic
-           │   = 兜底 topic               │   + route.rules[].topic
-           │   (ruleset 未配置时使用)      │   = 实际写入的 topic
+           │   只做鉴权 + 限流            │   ruleset.default_topic
+           │   不参与 topic 路由          │   + route.rules[].topic
+           │                              │   = 实际写入的 topic
            ▼                              ▼
     ┌──────────────────────────────────────────┐
-    │  prom.bj.routed.core                     │
-    │  prom.bj.routed.infra                    │
-    │  prom.bj.routed.data                     │
-    │  prom.bj.routed.app_business (兜底)      │
+    │  prom.bj.routed.s001                     │
+    │  prom.bj.routed.s002                     │
+    │  prom.bj.routed.s003                     │
+    │  prom.bj.routed.default (兜底)           │
     └──────────────────────────────────────────┘
 ```
 
 **topic 选取优先级**(代码确认,见 [pipeline.go:225-230](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/internal/ruleengine/pipeline.go#L225-L230)):
 
-1. route stage 设置的 `sample.TargetTopic`(最高优先级)
-2. ruleset 的 `default_topic`(route 未命中时)
-3. token 的 `default_topic`(ruleset 未配置时兜底)
+1. route stage 设置的 `sample.TargetTopic`(最高优先级,route 命中的 sysid 桶)
+2. ruleset 的 `default_topic`(route 未命中,走兜底 topic)
 
 ---
 

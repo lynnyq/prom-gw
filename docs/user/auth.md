@@ -7,9 +7,10 @@
 联系运维(目前仅 `prom-gw-admin`),提供:
 - 业务名(business)
 - 需要的 rate_limit
-- 默认投递的 Kafka topic
 
 获取一个 token,形如 `tk_app_business_dev`。
+
+> **重要**:token 只负责鉴权(身份 + 限流),**不再配置 topic**。topic 路由完全由 ruleset 配置(`rules.yaml`)负责,见 [ruleset-reference.md](ruleset-reference.md)。
 
 ## 2. Token 格式
 
@@ -32,8 +33,7 @@ tokens:
   "tk_app_business_dev":
     business: app-business         # 业务名,会作为 request 标签
     business_id: "1001"            # 未来 IAM 主键
-    default_topic: prom.raw.app_business
-    rate_limit: 80000            # 单business 80K samples/s
+    rate_limit: 80000              # 单business 80K samples/s
 ```
 
 字段说明:
@@ -41,8 +41,9 @@ tokens:
 |---|---|---|
 | `business` | ✓ | 业务名,进入 request 标签 |
 | `business_id` | | 未来 IAM 主键,v1 可空 |
-| `default_topic` | ✓ | 该 token 默认投递 topic |
 | `rate_limit` | | 单business限流(samples/s),默认 = 全局配置 |
+
+> **不再有 `default_topic`**:topic 路由由 ruleset 负责,修改路由规则只需改 `rules.yaml`,无需同步改 token。
 
 ## 4. 客户端使用
 

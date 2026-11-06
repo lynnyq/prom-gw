@@ -519,7 +519,6 @@ tokens:
   "<token-string>":
     business: ...
     business_id: ...
-    default_topic: ...
     rate_limit: ...
 ```
 
@@ -530,8 +529,9 @@ tokens:
 | `tokens` | map | ✓ | token → 配置的映射。key 是 token 字符串 |
 | `tokens[].business` | string | ✓ | business 名,写入 Kafka header `business` |
 | `tokens[].business_id` | string | 否 | IAM 主键(预留,本地可空) |
-| `tokens[].default_topic` | string | ✓ | 默认 topic(route 未命中时兜底) |
 | `tokens[].rate_limit` | int | 否 | 该 business 的 samples/s 上限。0 = 不限 |
+
+> **注意**:token 只负责鉴权(身份 + 限流),**不再配置 topic**。topic 路由完全由 ruleset 的 `default_topic` + route rules 负责,见上文 §3。
 
 ### 4.3 完整示例
 
@@ -540,19 +540,16 @@ tokens:
   "tk_app_business_dev":
     business: app-business
     business_id: "1001"
-    default_topic: prom.local.routed.app_business
     rate_limit: 80000
 
   "tk_infra_dev":
     business: infra
     business_id: "1002"
-    default_topic: prom.local.routed.infra
     rate_limit: 50000
 
   "tk_prod_bj_payment":
     business: payment
     business_id: "2001"
-    default_topic: prom.bj.routed.payment
     rate_limit: 200000
 ```
 
@@ -648,29 +645,28 @@ business rate limits reloaded businesses=3
 
 ### 6.1 本地开发最小配置
 
-`configs/rules/local-dev.yaml`:
+参考 [configs/rules/sysid-routing.yaml](../../configs/rules/sysid-routing.yaml) 和 [configs/tokens/local.yaml](../../configs/tokens/local.yaml)。
+
+**rules.yaml**:
 
 ```yaml
 rulesets:
-  - name: app-business
-    business: app-business
-    default_topic: prom.local.routed.app_business
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.local.routed.default
     version: 1
     match:
       metric_prefix: ""
     stages:
       - type: relabel
         drop_labels: [env, instance, pod]
-        keep_labels: []
-        label_map:
-          kubernetes_io_cluster: cluster
 
       - type: route
         rules:
-          - match: { team: "core" }
-            topic: prom.local.routed.core
-          - match: { team: "infra" }
-            topic: prom.local.routed.infra
+          - match: { sysid: "s001" }
+            topic: prom.local.routed.s001
+          - match: { sysid: "s002" }
+            topic: prom.local.routed.s002
 
       - type: sample
         rate: 1.0                    # 本地全量
@@ -680,14 +676,13 @@ global:
   channel_buffer: 65535
 ```
 
-`configs/tokens/local.yaml`:
+**tokens.yaml**:
 
 ```yaml
 tokens:
   "tk_app_business_dev":
     business: app-business
     business_id: "1001"
-    default_topic: prom.local.routed.app_business
     rate_limit: 80000
 ```
 
@@ -695,7 +690,7 @@ tokens:
 ```bash
 KAFKA_BROKERS=localhost:9092 \
 ./bin/prom-gw \
-  --config=configs/rules/local-dev.yaml \
+  --config=configs/rules/sysid-routing.yaml \
   --tokens=configs/tokens/local.yaml \
   --wal-dir=/tmp/prom-gw-local-wal \
   --wal-max-bytes=1073741824 \
@@ -710,107 +705,65 @@ KAFKA_BROKERS=localhost:9092 \
 
 ### 6.2 生产完整配置(北京)
 
-`configs/rules/bj/default.yaml`:
+参考 [configs/rules/bj/default.yaml](../../configs/rules/bj/default.yaml) 和 [configs/tokens/bj.yaml](../../configs/tokens/bj.yaml)。
+
+**rules.yaml**:
 
 ```yaml
 rulesets:
-  # 1. app-business 业务指标
-  - name: app-business-bj
-    business: app-business
-    default_topic: prom.bj.routed.app_business
-    version: 7
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.bj.routed.default  # 未命中 sysid 时的兜底 topic
+    version: 1
     match:
-      metric_prefix: ""              # 全量接收
+      metric_prefix: ""
     stages:
-      # 1.1 标签清洗
+      # 标签清洗:删除噪音标签,保留 sysid/sproject/datacenter/ip/job
       - type: relabel
         drop_labels:
-          - env_internal
-          - scrape_id
-          - pod_template_hash
-        keep_labels: []              # 不启用白名单
+          - env
+          - instance
+          - pod
+        keep_labels: []
         label_map:
           kubernetes_io_cluster: cluster
 
-      # 1.2 路由:按 team 分流
+      # 按 sysid 路由到独立 topic
       - type: route
         rules:
-          - match: { team: "core" }
-            topic: prom.bj.routed.core
-          - match: { team: "infra" }
-            topic: prom.bj.routed.infra
-          - match: { team: "data" }
-            topic: prom.bj.routed.data
-          - match: { team: "mobile-app" }
-            topic: prom.bj.routed.mobile
-        # default_topic 省略,继承外层
+          - match: { sysid: "s001" }
+            topic: prom.bj.routed.s001
+          - match: { sysid: "s002" }
+            topic: prom.bj.routed.s002
+          # 新增 S 系统:添加一条 match + 预创建 topic
+          # - match: { sysid: "s003" }
+          #   topic: prom.bj.routed.s003
 
-      # 1.3 兜底采样:5%
+      # 采样:生产按需调整
       - type: sample
-        rate: 0.05
-
-  # 2. infra 基础设施指标(高保留)
-  - name: infra-bj
-    business: infra
-    default_topic: prom.bj.routed.infra
-    version: 3
-    match:
-      metric_prefix: ""              # 全量
-    stages:
-      - type: relabel
-        drop_labels: [pod, container_id]
-        label_map:
-          kubernetes_io_cluster: cluster
-
-      # 2.1 死值丢弃(5min 内值不变则丢)
-      - type: deadvalue
-        window: 5m
-        max_series: 2000000
-
-  # 3. 长期趋势指标(降采样)
-  - name: longterm-bj
-    business: app-business
-    default_topic: prom.bj.agg5m.app_business
-    version: 2
-    match:
-      metric_prefix: "trend_"
-    stages:
-      - type: relabel
-        drop_labels: [instance, pod]
-
-      - type: downsample
-        interval: 5m
-        aggregations: [avg, max, min, p50, p99]
-        max_series: 5000000
-        p99_max_samples: 8192
+        rate: 1.0
 
 global:
-  rate_limit_per_instance: 200000    # 生产高吞吐
-  channel_buffer: 131072             # 缓解背压
+  rate_limit_per_instance: 100000
+  channel_buffer: 65535
 ```
 
-`configs/tokens/production-bj.yaml`:
+**tokens.yaml**:
 
 ```yaml
 tokens:
-  "tk_prod_bj_app_business_<secret>":
+  "tk_app_business_prod":
     business: app-business
     business_id: "1001"
-    default_topic: prom.bj.routed.app_business
-    rate_limit: 200000
+    rate_limit: 80000
 
-  "tk_prod_bj_infra_<secret>":
+  "tk_infra_prod":
     business: infra
     business_id: "1002"
-    default_topic: prom.bj.routed.infra
-    rate_limit: 150000
-
-  "tk_prod_bj_payment_<secret>":
-    business: payment
-    business_id: "2001"
-    default_topic: prom.bj.routed.payment
-    rate_limit: 100000
+    rate_limit: 50000
 ```
+
+> **注意**:token 只做鉴权 + 限流,不再配置 topic。新增 S 系统只需修改 rules.yaml 添加 route rule + 预创建 topic,无需改 token。
 
 systemd 启动(`prom-gw@bj.service`):
 
@@ -820,8 +773,8 @@ Environment=KAFKA_BROKERS=kafka-1.bj:9094,kafka-2.bj:9094,kafka-3.bj:9094
 Environment=INGEST_CITY=bj
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability.bj:4317
 ExecStart=/appdata/prom-gw/bin/prom-gw \
-  --config=/etc/prom-gw/rules/bj/default.yaml \
-  --tokens=/etc/prom-gw/tokens/production-bj.yaml \
+  --config=/appdata/prom-gw/conf/rules.yaml \
+  --tokens=/appdata/prom-gw/conf/tokens.yaml \
   --metrics-addr=:8080 \
   --health-addr=:8081 \
   --write-addr=:19201 \

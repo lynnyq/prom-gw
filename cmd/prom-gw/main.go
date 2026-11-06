@@ -417,7 +417,7 @@ func run() error {
 		Logger:        logger.Named("receiver"),
 		SourceDC:      *sourceDC,
 		IngestCity:    *ingestCity,
-		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error {
+		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample) error {
 			// 抽取请求级 Meta 用于 headers
 			meta, _ := parser.MetaFromContext(ctx)
 			headers := map[string]string{
@@ -432,8 +432,10 @@ func run() error {
 			// T1.9 6 阶段串联: receiver → rule engine manager(fan-out)→ pipeline → sink
 			// Manager 按 Match 把 sample 分桶后,并行触发各 ruleset 的 pipeline;
 			// 每 ruleset 内仍走"relabel→route→sample→…" 单 stage 链。
+			// topic 路由完全由 ruleset.DefaultTopic + route rules 负责,
+			// msg.Topic 设为空,由 pipeline 用 ruleset.DefaultTopic 兜底。
 			msg := sink.Message{
-				Topic:   defaultTopic,
+				Topic:   "",
 				Key:     []byte(meta.Business), // Phase 1: 按 business 分区
 				Headers: headers,
 			}

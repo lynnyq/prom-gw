@@ -1,32 +1,27 @@
 # Ruleset 字段参考
 
-一个 ruleset 配置文件示例(`configs/rules/app-business.yaml`):
+一个 ruleset 配置文件示例(参考 [configs/rules/sysid-routing.yaml](../../configs/rules/sysid-routing.yaml)):
 
 ```yaml
 rulesets:
-  - name: app-business
-    default_topic: prom.app_business              # 没路由命中时的兜底 topic
-    version: 1                                    # 必须严格递增
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.local.routed.default  # 没路由命中时的兜底 topic
+    version: 1                                 # 必须严格递增
     stages:
-      - type: relabel                             # 标签增删改
-        config:
-          ...
-      - type: route                               # 路由到不同 topic
-        config:
-          ...
-      - type: sample                              # 采样
-        config:
-          rate: 0.5
-      - type: enrich                              # 静态/模板 label
-        config:
-          ...
-      - type: downsample                          # 按时间桶聚合
-        config:
-          ...
-      - type: deadvalue                           # 死值丢弃
-        config:
-          ...
+      - type: relabel                          # 标签增删改
+        drop_labels: [env, instance, pod]
+      - type: route                            # 路由到不同 topic(按 sysid)
+        rules:
+          - match: { sysid: "s001" }
+            topic: prom.local.routed.s001
+          - match: { sysid: "s002" }
+            topic: prom.local.routed.s002
+      - type: sample                           # 采样
+        rate: 1.0
 ```
+
+> **重要**:topic 路由**完全由 ruleset 负责**(`default_topic` + route rules),token 不再配置 topic。详见 [auth.md](auth.md)。
 
 ## 全局字段
 
@@ -70,24 +65,21 @@ rulesets:
 
 ### route
 
-按 label 路由到不同 topic(match 全部采用**精确匹配**,不支持 glob)。
+按 `sysid` 标签路由到不同 topic(match 全部采用**精确匹配**,不支持 glob)。
 
 ```yaml
 - type: route
-  config:
-    rules:
-      - match: { team: app }
-        topic: prom.app
-      - match: { team: infra, env: prod }     # 多 key 全部命中才算匹配
-        topic: prom.infra_prod
-      - match: { team: mobile-app }          # 字面精确值,无 glob
-        topic: prom.mobile
-    default_topic: prom.default              # 不命中时使用(也可省略,继承外层 default_topic)
+  rules:
+    - match: { sysid: "s001" }              # S 系统 s001
+      topic: prom.<city>.routed.s001
+    - match: { sysid: "s002" }              # S 系统 s002
+      topic: prom.<city>.routed.s002
+    # 新增 S 系统:添加一条 match + 预创建 topic
 ```
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `rules[].match` | map | 精确匹配,所有 key=value 必须命中(字符串完全相等) |
+| `rules[].match` | map | 精确匹配,所有 key=value 必须命中(字符串完全相等)。生产用 `{ sysid: "<sysid>" }` |
 | `rules[].topic` | string | 命中时投递到此 topic |
 | `default_topic` | string | 不命中时的 topic(默认 = `rulesets[].default_topic`) |
 
@@ -195,40 +187,24 @@ curl -X POST 'http://prom-gw-1:8082/v1/rulesets/app-business:rollback?to_version
 
 ```yaml
 rulesets:
-  - name: app-business
-    default_topic: prom.app_business
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.bj.routed.default
     version: 1
     stages:
-      # 1. 删除内部调试 label
+      # 1. 删除噪音标签,保留 sysid/sproject/datacenter/ip/job
       - type: relabel
-        config:
-          drop_labels: ["_internal_*", "scrape_id"]
-          keep_labels: ["__name__", "instance", "job", "env", "region", "team"]
+        drop_labels: [env, instance, pod]
 
-      # 2. 路由:team 区分 topic
+      # 2. 路由:按 sysid 区分 topic
       - type: route
-        config:
-          rules:
-            - match: { team: app }
-              topic: prom.app
-            - match: { team: infra }
-              topic: prom.infra
+        rules:
+          - match: { sysid: "s001" }
+            topic: prom.bj.routed.s001
+          - match: { sysid: "s002" }
+            topic: prom.bj.routed.s002
 
-      # 3. 采样:丢掉一半
+      # 3. 采样:生产按需调整
       - type: sample
-        config:
-          rate: 0.5
-
-      # 4. enrich 加 source
-      - type: enrich
-        config:
-          labels:
-            gateway_dc: "${source_dc}"
-            gateway_business: "${business}"
-
-      # 5. downsample 1 分钟桶
-      - type: downsample
-        config:
-          interval: 1m
-          aggregations: [avg, max, p99]
+        rate: 1.0
 ```

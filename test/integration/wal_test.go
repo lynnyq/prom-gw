@@ -201,14 +201,14 @@ func TestWAL_ViaReceiver(t *testing.T) {
 	var mu sync.Mutex
 
 	authN := newMockAuth()
-	handler := func(_ context.Context, raw []byte, _ []parser.Sample, defaultTopic string) error {
+	handler := func(_ context.Context, raw []byte, _ []parser.Sample) error {
 		mu.Lock()
 		defer mu.Unlock()
 		cp := make([]byte, len(raw))
 		copy(cp, raw)
 		received = append(received, cp)
 		return ws.Send(context.Background(), sink.Message{
-			Topic:   defaultTopic,
+			Topic:   "prom.wal.test", // WAL 测试绕过 pipeline,需显式 topic
 			Key:     []byte("k"),
 			Payload: cp,
 		})
@@ -220,7 +220,7 @@ func TestWAL_ViaReceiver(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		req := makeWriteRequestFromSamples("m", map[string]string{"i": string(rune('a' + i))}, 1, 1)
 		resp := h.postRemoteWrite(t, "tk_app_business", encodeWriteRequest(req), nil)
-		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
 		resp.Body.Close()
 	}
 

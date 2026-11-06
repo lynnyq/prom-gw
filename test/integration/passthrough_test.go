@@ -32,7 +32,7 @@ func TestPassthrough_HappyPath(t *testing.T) {
 	var received [][]byte
 	var mu sync.Mutex
 
-	handler := func(_ context.Context, raw []byte, samples []parser.Sample, _ string) error {
+	handler := func(_ context.Context, raw []byte, samples []parser.Sample) error {
 		mu.Lock()
 		defer mu.Unlock()
 		// 模拟真实 sink:把 raw body 包装成 sink.Message(测试中只校验 payload 字节级一致)
@@ -58,7 +58,7 @@ func TestPassthrough_HappyPath(t *testing.T) {
 
 	resp := h.postRemoteWrite(t, "tk_app_business", body, nil)
 	defer resp.Body.Close()
-	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// 等 sink 收完
 	require.Eventually(t, func() bool {
@@ -75,7 +75,7 @@ func TestPassthrough_HappyPath(t *testing.T) {
 
 func TestPassthrough_AuthMissing(t *testing.T) {
 	authN := newMockAuth()
-	handler := func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error { return nil }
+	handler := func(_ context.Context, _ []byte, _ []parser.Sample) error { return nil }
 	h := newReceiverHarness(t, authN, handler)
 	defer h.Close()
 
@@ -91,7 +91,7 @@ func TestPassthrough_AuthMissing(t *testing.T) {
 
 func TestPassthrough_AuthInvalid(t *testing.T) {
 	authN := newMockAuth()
-	handler := func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error { return nil }
+	handler := func(_ context.Context, _ []byte, _ []parser.Sample) error { return nil }
 	h := newReceiverHarness(t, authN, handler)
 	defer h.Close()
 
@@ -106,7 +106,7 @@ func TestPassthrough_AuthInvalid(t *testing.T) {
 
 func TestPassthrough_BadContentType(t *testing.T) {
 	authN := newMockAuth()
-	handler := func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error { return nil }
+	handler := func(_ context.Context, _ []byte, _ []parser.Sample) error { return nil }
 	h := newReceiverHarness(t, authN, handler)
 	defer h.Close()
 
@@ -128,7 +128,7 @@ func TestPassthrough_BadContentType(t *testing.T) {
 
 func TestPassthrough_BadContentEncoding(t *testing.T) {
 	authN := newMockAuth()
-	handler := func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error { return nil }
+	handler := func(_ context.Context, _ []byte, _ []parser.Sample) error { return nil }
 	h := newReceiverHarness(t, authN, handler)
 	defer h.Close()
 
@@ -144,7 +144,7 @@ func TestPassthrough_BadContentEncoding(t *testing.T) {
 
 func TestPassthrough_BadProtobuf(t *testing.T) {
 	authN := newMockAuth()
-	handler := func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error { return nil }
+	handler := func(_ context.Context, _ []byte, _ []parser.Sample) error { return nil }
 	h := newReceiverHarness(t, authN, handler)
 	defer h.Close()
 
@@ -164,7 +164,7 @@ func TestPassthrough_BackpressureFromHandler(t *testing.T) {
 	ms := newMockSink()
 	ms.alwaysReject.Store(true) // 持续背压
 
-	handler := func(_ context.Context, raw []byte, _ []parser.Sample, _ string) error {
+	handler := func(_ context.Context, raw []byte, _ []parser.Sample) error {
 		return ms.Send(context.Background(), sink.Message{Topic: "t", Payload: raw})
 	}
 	h := newReceiverHarness(t, authN, handler)
@@ -176,16 +176,16 @@ func TestPassthrough_BackpressureFromHandler(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }
 
-// TestPassthrough_PerTenantTenantAssignment 验证 ctx.Meta.Tenant 正确注入。
-func TestPassthrough_PerTenantTenantAssignment(t *testing.T) {
+// TestPassthrough_BusinessAssignment 验证 ctx.Meta.Business 正确注入。
+func TestPassthrough_BusinessAssignment(t *testing.T) {
 	authN := newMockAuth()
-	var seenTenant string
+	var seenBusiness string
 	var mu sync.Mutex
-	handler := func(ctx context.Context, _ []byte, _ []parser.Sample, _ string) error {
+	handler := func(ctx context.Context, _ []byte, _ []parser.Sample) error {
 		meta, ok := parser.MetaFromContext(ctx)
 		require.True(t, ok)
 		mu.Lock()
-		seenTenant = meta.Tenant
+		seenBusiness = meta.Business
 		mu.Unlock()
 		return nil
 	}
@@ -195,16 +195,16 @@ func TestPassthrough_PerTenantTenantAssignment(t *testing.T) {
 	req := makeWriteRequestFromSamples("m", nil, 1, 1)
 	resp := h.postRemoteWrite(t, "tk_infra", encodeWriteRequest(req), nil)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return seenTenant != ""
+		return seenBusiness != ""
 	}, 1*time.Second, 10*time.Millisecond)
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, "infra", seenTenant)
+	assert.Equal(t, "infra", seenBusiness)
 }
 
 // TestPassthrough_TraceparentPassedToHandler 验证 traceparent header 注入 ctx,handler 可拿到。
@@ -212,7 +212,7 @@ func TestPassthrough_TraceparentPassedToHandler(t *testing.T) {
 	authN := newMockAuth()
 	var seenTraceID string
 	var mu sync.Mutex
-	handler := func(ctx context.Context, _ []byte, _ []parser.Sample, _ string) error {
+	handler := func(ctx context.Context, _ []byte, _ []parser.Sample) error {
 		meta, _ := parser.MetaFromContext(ctx)
 		mu.Lock()
 		seenTraceID = meta.TraceID
@@ -229,7 +229,7 @@ func TestPassthrough_TraceparentPassedToHandler(t *testing.T) {
 		"traceparent": traceparent,
 	})
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -246,7 +246,7 @@ func TestPassthrough_SamplesParsed(t *testing.T) {
 	authN := newMockAuth()
 	var seenSamples []parser.Sample
 	var mu sync.Mutex
-	handler := func(_ context.Context, _ []byte, samples []parser.Sample, _ string) error {
+	handler := func(_ context.Context, _ []byte, samples []parser.Sample) error {
 		mu.Lock()
 		seenSamples = samples
 		mu.Unlock()
@@ -263,7 +263,7 @@ func TestPassthrough_SamplesParsed(t *testing.T) {
 	req := makeWriteRequestFromSerieses(serieses)
 	resp := h.postRemoteWrite(t, "tk_app_business", encodeWriteRequest(req), nil)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
@@ -280,7 +280,7 @@ func TestPassthrough_ResponseEnvelopeIsCorrect(t *testing.T) {
 	authN := newMockAuth()
 	ms := newMockSink()
 	ms.alwaysReject.Store(true)
-	handler := func(_ context.Context, raw []byte, _ []parser.Sample, _ string) error {
+	handler := func(_ context.Context, raw []byte, _ []parser.Sample) error {
 		return ms.Send(context.Background(), sink.Message{Topic: "t", Payload: raw})
 	}
 	h := newReceiverHarness(t, authN, handler)

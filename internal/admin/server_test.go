@@ -47,8 +47,8 @@ func newMockService() *mockService {
 	return &mockService{
 		ruleSets: make(map[string]config.HistoryRecord),
 		businesses: []auth.Business{
-			{Name: "app-business", BusinessID: "1001", DefaultTopic: "prom.routed.app_business", RateLimit: 80000},
-			{Name: "infra", BusinessID: "1002", DefaultTopic: "prom.routed.infra", RateLimit: 50000},
+			{Name: "app-business", BusinessID: "1001", RateLimit: 80000},
+			{Name: "infra", BusinessID: "1002", RateLimit: 50000},
 		},
 	}
 }
@@ -162,8 +162,7 @@ func (m *mockService) ListBusinesses(_ context.Context) []BusinessInfo {
 	out := make([]BusinessInfo, len(m.businesses))
 	for i, t := range m.businesses {
 		out[i] = BusinessInfo{
-			Business: t.Name, BusinessID: t.BusinessID,
-			DefaultTopic: t.DefaultTopic, RateLimit: t.RateLimit,
+			Business: t.Name, BusinessID: t.BusinessID, RateLimit: t.RateLimit,
 		}
 	}
 	return out

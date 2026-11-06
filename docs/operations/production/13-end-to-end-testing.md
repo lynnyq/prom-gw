@@ -14,7 +14,7 @@ make build
 
 # 4. 确认配置文件
 cat configs/tokens/local.yaml
-cat configs/rules/app-business.yaml
+cat configs/rules/sysid-routing.yaml
 ```
 
 ### 7.2 测试 1:WAL-only 模式冒烟测试(无 Kafka)
@@ -25,7 +25,7 @@ cat configs/rules/app-business.yaml
 # 启动 prom-gw(无 KAFKA_BROKERS → WAL-only 模式)
 KAFKA_BROKERS="" \
 ./bin/prom-gw \
-  --config=configs/rules/app-business.yaml \
+  --config=configs/rules/sysid-routing.yaml \
   --tokens=configs/tokens/local.yaml \
   --wal-dir=/tmp/prom-gw-test-wal \
   --write-addr=:19201 \
@@ -117,7 +117,7 @@ rm -rf /tmp/prom-gw-test-wal /tmp/payload.bin
 ```bash
 KAFKA_BROKERS=kafka-1:9092,kafka-2:9092,kafka-3:9092 \
 ./bin/prom-gw \
-  --config=configs/rules/app-business.yaml \
+  --config=configs/rules/sysid-routing.yaml \
   --tokens=configs/tokens/local.yaml \
   --wal-dir=/tmp/prom-gw-e2e-wal \
   --write-addr=:19201 \
@@ -199,7 +199,7 @@ rm -rf /tmp/prom-gw-e2e-wal /tmp/payload-*.bin
 # 1. 启动 prom-gw(连接一个不存在的 Kafka 地址模拟故障)
 KAFKA_BROKERS=127.0.0.1:9999 \
 ./bin/prom-gw \
-  --config=configs/rules/app-business.yaml \
+  --config=configs/rules/sysid-routing.yaml \
   --tokens=configs/tokens/local.yaml \
   --wal-dir=/tmp/prom-gw-failover-wal \
   --write-addr=:19201 \
@@ -246,10 +246,10 @@ rm -rf /tmp/prom-gw-failover-wal /tmp/failover-*.bin
 > 验证 relabel/route/sample 规则正确执行。
 
 ```bash
-# 使用 app-business ruleset(包含 relabel + route + sample)
+# 使用 sysid-routing ruleset(包含 relabel + route + sample,按 sysid 分桶)
 KAFKA_BROKERS=kafka-1:9092 \
 ./bin/prom-gw \
-  --config=configs/rules/app-business.yaml \
+  --config=configs/rules/sysid-routing.yaml \
   --tokens=configs/tokens/local.yaml \
   --wal-dir=/tmp/prom-gw-rule-wal \
   --write-addr=:19201 \
@@ -258,7 +258,7 @@ KAFKA_BROKERS=kafka-1:9092 \
 GW_PID=$!
 sleep 2
 
-# 构造带 team 标签的 sample
+# 构造带 sysid=s001 标签的 sample
 cat > /tmp/rule-test.go << 'EOF'
 package main
 import (
@@ -272,7 +272,7 @@ func main() {
   req := &prompb.WriteRequest{Timeseries: []prompb.TimeSeries{
     {Labels: []prompb.Label{
       {Name: "__name__", Value: "app_cpu_usage"},
-      {Name: "team", Value: "core"},
+      {Name: "sysid", Value: "s001"},
       {Name: "env", Value: "prod"},
       {Name: "instance", Value: "10.0.0.1:9090"},
     }, Samples: []prompb.Sample{{Value: 88.5, Timestamp: time.Now().UnixMilli()}}},
@@ -297,10 +297,10 @@ curl -sS -o /dev/null -w "HTTP %{http_code}\n" \
   -H "Authorization: Bearer tk_app_business_dev" \
   --data-binary @/tmp/rule-payload.bin
 
-# 验证路由到 prom.bj.routed.core(team=core)
+# 验证路由到 prom.local.routed.s001(sysid=s001)
 /appdata/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server kafka-1:9092 \
-  --topic prom.bj.routed.core \
+  --topic prom.local.routed.s001 \
   --from-beginning --max-messages 1 --timeout-ms 10000 | xxd | head
 
 # 验证 ruleset 指标

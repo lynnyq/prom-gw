@@ -38,7 +38,7 @@ rulesets:
 	req := makeWriteRequestFromSamples("http_total", map[string]string{"job": "api"}, 1, 1)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
@@ -71,7 +71,7 @@ rulesets:
 	req := makeWriteRequestFromSamples("http_total", map[string]string{"region": "us-west"}, 1, 1)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
@@ -110,7 +110,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// 等到 emit 发生
 	require.Eventually(t, func() bool {
@@ -143,7 +143,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
@@ -176,7 +176,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 2
@@ -203,7 +203,7 @@ rulesets:
 	req := makeWriteRequestFromSamples("m", map[string]string{"a": "1"}, 5, 1000)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
@@ -235,7 +235,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// 等 300ms,只应有 1 条
 	time.Sleep(300 * time.Millisecond)
@@ -266,7 +266,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 2
@@ -298,7 +298,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 2
@@ -315,34 +315,34 @@ rulesets:
     default_topic: prom.default
     version: 1
     stages:
+      - type: relabel
+        config:
+          drop_labels: ["env"]
       - type: enrich
         config:
           labels:
-            team: "${labels.owner}"
-      - type: relabel
-        config:
-          drop_labels: ["owner"]
+            cluster: prod
       - type: route
         config:
           rules:
             - match:
-                team: app
+                cluster: prod
               topic: prom.app
 `
 	h := newRuleHarness(t, yaml)
 	defer h.Close()
 
-	req := makeWriteRequestFromSamples("m", map[string]string{"owner": "app"}, 1, 1)
+	req := makeWriteRequestFromSamples("m", map[string]string{"env": "staging", "cluster": "prod"}, 1, 1)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
 	}, 1*time.Second, 10*time.Millisecond)
 	msgs := h.messages()
 	require.Len(t, msgs, 1)
-	assert.Equal(t, "prom.app", msgs[0].Topic, "enrich owner→team 后 route 命中 app")
+	assert.Equal(t, "prom.app", msgs[0].Topic, "relabel 清理 env + enrich 写 cluster + route 命中 prod")
 }
 
 // _ = parser.Sample 防止 parser import unused 报警(集成测试只验证 rule engine 行为)

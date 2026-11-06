@@ -16,12 +16,10 @@ tokens:
   "tk_test_a":
     business: app-business
     business_id: "1001"
-    default_topic: prom.routed.app_business
     rate_limit: 80000
   "tk_test_b":
     business: infra
     business_id: "1002"
-    default_topic: prom.routed.infra
     rate_limit: 50000
 `
 
@@ -48,7 +46,6 @@ func TestVerify_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "app-business", business.Name)
 	assert.Equal(t, "1001", business.BusinessID)
-	assert.Equal(t, "prom.routed.app_business", business.DefaultTopic)
 	assert.Equal(t, 80000, business.RateLimit)
 }
 

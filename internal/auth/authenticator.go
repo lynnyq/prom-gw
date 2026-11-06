@@ -29,10 +29,9 @@ var (
 // Business 鉴权成功后的业务方信息。
 // 字段顺序与 yaml 对齐;新增字段时注意 json/yaml 双向兼容。
 type Business struct {
-	Name         string // 业务短名,作为 sample.Business
-	DefaultTopic string // 路由未命中时的兜底 topic
-	BusinessID   string // IAM 主键(本地模式为占位)
-	RateLimit    int    // samples/s 上限
+	Name       string // 业务短名,作为 sample.Business
+	BusinessID string // IAM 主键(本地模式为占位)
+	RateLimit  int    // samples/s 上限
 }
 
 // Authenticator 鉴权接口。

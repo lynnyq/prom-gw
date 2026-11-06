@@ -57,32 +57,42 @@ func TestMain(m *testing.M) {
 // mockAuth 实现 auth.Authenticator 接口,只接受预置 token。
 type mockAuth struct {
 	mu     sync.RWMutex
-	tokens map[string]auth.Tenant
+	tokens map[string]auth.Business
 }
 
 func newMockAuth() *mockAuth {
 	return &mockAuth{
-		tokens: map[string]auth.Tenant{
-			"tk_app_business": {Name: "app-business", TenantID: "1001", DefaultTopic: "prom.raw.app_business", RateLimit: 80000},
-			"tk_infra":        {Name: "infra", TenantID: "1002", DefaultTopic: "prom.raw.infra", RateLimit: 50000},
+		tokens: map[string]auth.Business{
+			"tk_app_business": {Name: "app-business", BusinessID: "1001", RateLimit: 80000},
+			"tk_infra":        {Name: "infra", BusinessID: "1002", RateLimit: 50000},
 		},
 	}
 }
 
-func (a *mockAuth) Verify(_ context.Context, token string) (auth.Tenant, error) {
+func (a *mockAuth) Verify(_ context.Context, token string) (auth.Business, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if token == "" {
-		return auth.Tenant{}, auth.ErrTokenMissing
+		return auth.Business{}, auth.ErrTokenMissing
 	}
 	t, ok := a.tokens[token]
 	if !ok {
-		return auth.Tenant{}, auth.ErrTokenInvalid
+		return auth.Business{}, auth.ErrTokenInvalid
 	}
 	return t, nil
 }
 
-func (a *mockAuth) add(token string, t auth.Tenant) {
+func (a *mockAuth) ListBusinesses() []auth.Business {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]auth.Business, 0, len(a.tokens))
+	for _, t := range a.tokens {
+		out = append(out, t)
+	}
+	return out
+}
+
+func (a *mockAuth) add(token string, t auth.Business) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.tokens[token] = t
@@ -140,10 +150,10 @@ type receiverHarness struct {
 	srv     *httptest.Server
 	server  *receiver.Server
 	auth    *mockAuth
-	handler func(context.Context, []byte, []parser.Sample, string) error
+	handler func(context.Context, []byte, []parser.Sample) error
 }
 
-func newReceiverHarness(t *testing.T, authN auth.Authenticator, handler func(context.Context, []byte, []parser.Sample, string) error) *receiverHarness {
+func newReceiverHarness(t *testing.T, authN auth.Authenticator, handler func(context.Context, []byte, []parser.Sample) error) *receiverHarness {
 	t.Helper()
 	srv, err := receiver.New(receiver.Config{
 		Addr:            "127.0.0.1:0",

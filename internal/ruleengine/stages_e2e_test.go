@@ -178,16 +178,16 @@ rulesets:
 	assert.Equal(t, 1, len(captured), "死值场景应只发出 1 条")
 }
 
-// TestStagesE2E_LoadAppBusinessYAML 跑仓库里实际配置文件,确认整体可加载可运行。
-func TestStagesE2E_LoadAppBusinessYAML(t *testing.T) {
+// TestStagesE2E_LoadSysidRoutingYAML 跑仓库里实际配置文件,确认整体可加载可运行。
+func TestStagesE2E_LoadSysidRoutingYAML(t *testing.T) {
 	repoRoot := findRepoRoot(t)
-	path := filepath.Join(repoRoot, "configs", "rules", "app-business.yaml")
+	path := filepath.Join(repoRoot, "configs", "rules", "sysid-routing.yaml")
 	cfg, err := LoadFile(path)
 	require.NoError(t, err)
 
-	// app-business.yaml 暂时可能只配了 3 个 stage(relabel/route/sample),
+	// sysid-routing.yaml 配了 3 个 stage(relabel/route/sample),
 	// 验证全部可编译并能跑通一个 batch
-	rs, err := CompileConfig(cfg, "app-business")
+	rs, err := CompileConfig(cfg, "sysid-routing")
 	require.NoError(t, err)
 
 	var captured int
@@ -200,12 +200,12 @@ func TestStagesE2E_LoadAppBusinessYAML(t *testing.T) {
 	samples := []parser.Sample{{
 		Metric: "app_requests_total",
 		Labels: []parser.Label{
-			{Name: "team", Value: "core"},
+			{Name: "sysid", Value: "s001"},
 			{Name: "env", Value: "prod"},
 		},
 	}}
-	require.NoError(t, p.Process(context.Background(), samples, []byte("raw"), sink.Message{Topic: "ignored"}))
-	assert.GreaterOrEqual(t, captured, 0, "至少 0 条(随机 sample rate)")
+	require.NoError(t, p.Process(context.Background(), samples, []byte("raw"), sink.Message{Topic: ""}))
+	assert.Equal(t, 1, captured, "rate=1.0 应全量保留")
 }
 
 // TestStagesE2E_HotReload 切换 ruleset 后行为应符合新版本。

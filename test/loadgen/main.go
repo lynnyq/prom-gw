@@ -131,8 +131,8 @@ func main() {
 		status200     atomic.Int64
 		statusOther   atomic.Int64
 	)
-	_ = status200
-	_ = statusOther
+		_ = status200.Load()
+		_ = statusOther.Load()
 
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,

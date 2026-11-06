@@ -62,11 +62,11 @@ func newChaosHarness(t *testing.T, maxBytes int64) *chaosHarness {
 		Authenticator: authn,
 		Logger:        zap.NewNop(),
 		SourceDC:      "chaos-dc",
-		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error {
+		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample) error {
 			// 把 samples 转 sink.Message 写到 WAL
 			for _, s := range samples {
 				msg := sink.Message{
-					Topic:   defaultTopic,
+					Topic:   "prom.chaos.test", // chaos 测试绕过 pipeline,需要显式 topic
 					Key:     []byte(strconv.FormatUint(s.SeriesKey(), 16)),
 					Payload: raw,
 				}
@@ -96,13 +96,13 @@ type stubAuth struct{}
 func (s *stubAuth) Verify(_ context.Context, token string) (auth.Business, error) {
 	if token == "tk_chaos" {
 		return auth.Business{
-			Name: "chaos-tenant", BusinessID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000,
+			Name: "chaos-tenant", BusinessID: "9000", RateLimit: 1000,
 		}, nil
 	}
 	return auth.Business{}, auth.ErrTokenInvalid
 }
 func (s *stubAuth) ListBusinesses() []auth.Business {
-	return []auth.Business{{Name: "chaos-tenant", BusinessID: "9000", DefaultTopic: "prom.chaos", RateLimit: 1000}}
+	return []auth.Business{{Name: "chaos-tenant", BusinessID: "9000", RateLimit: 1000}}
 }
 
 // buildPayload 构造 1 个 TimeSeries + 1 个 Sample, snappy 编码。

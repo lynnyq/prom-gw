@@ -124,10 +124,10 @@ func (h *adminHarness) putRuleSet(t *testing.T, name string, version int64, yaml
 // stubAuthProvider 最小 AuthProvider 实现。
 type stubAuthProvider struct{}
 
-func (s *stubAuthProvider) ListTenants() []auth.Tenant {
-	return []auth.Tenant{
-		{Name: "app-business", TenantID: "1001", DefaultTopic: "prom.raw.app_business", RateLimit: 80000},
-		{Name: "infra", TenantID: "1002", DefaultTopic: "prom.raw.infra", RateLimit: 50000},
+func (s *stubAuthProvider) ListBusinesses() []auth.Business {
+	return []auth.Business{
+		{Name: "app-business", BusinessID: "1001", RateLimit: 80000},
+		{Name: "infra", BusinessID: "1002", RateLimit: 50000},
 	}
 }
 
@@ -307,11 +307,11 @@ func TestAdmin_History(t *testing.T) {
 	assert.Contains(t, string(body), "history")
 }
 
-// TestAdmin_Tenants 验证 /v1/tenants。
-func TestAdmin_Tenants(t *testing.T) {
+// TestAdmin_Businesses 验证 /v1/businesses。
+func TestAdmin_Businesses(t *testing.T) {
 	h := newAdminHarness(t)
 	defer h.Close()
-	resp, body := h.do(t, http.MethodGet, "/v1/tenants", nil)
+	resp, body := h.do(t, http.MethodGet, "/v1/businesses", nil)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, string(body), "app-business")
 	assert.Contains(t, string(body), "infra")

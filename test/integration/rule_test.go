@@ -44,18 +44,18 @@ func newRuleHarness(t *testing.T, rulesYAML string) *ruleHarness {
 	})
 	pipe.SetRules(compiled)
 
-	recv := newReceiverHarness(t, authN, func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error {
+	recv := newReceiverHarness(t, authN, func(ctx context.Context, raw []byte, samples []parser.Sample) error {
 		meta, _ := parser.MetaFromContext(ctx)
 		headers := map[string]string{
-			"tenant":         meta.Tenant,
+			"business":       meta.Business,
 			"source_dc":      meta.SourceDC,
 			"ingest_city":    meta.IngestCity,
 			"ingest_dc":      meta.SourceDC,
 			"ingest_time_ms": "0",
 		}
 		msg := sink.Message{
-			Topic:   defaultTopic,
-			Key:     []byte(meta.Tenant),
+			Topic:   "", // 由 pipeline 的 ruleset.DefaultTopic 兜底
+			Key:     []byte(meta.Business),
 			Headers: headers,
 		}
 		return pipe.Process(ctx, samples, raw, msg)
@@ -98,7 +98,7 @@ rulesets:
 	}, 1, 1)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		return len(h.messages()) >= 1
@@ -137,7 +137,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		msgs := h.messages()
@@ -174,7 +174,7 @@ rulesets:
 	})
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// 等 200ms 后看 sink 是否收到(应当 0 条)
 	time.Sleep(200 * time.Millisecond)
@@ -196,7 +196,7 @@ rulesets:
 	req := makeWriteRequestFromSamples("m", nil, 1, 1)
 	resp := h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		msgs := h.messages()
@@ -220,7 +220,7 @@ rulesets:
 	req = makeWriteRequestFromSamples("m2", nil, 1, 1)
 	resp = h.post(t, "tk_app_business", encodeWriteRequest(req))
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	require.Eventually(t, func() bool {
 		msgs := h.messages()
@@ -237,11 +237,11 @@ func TestRule_DefaultFallbackWhenNoRules(t *testing.T) {
 	pipe := ruleengine.NewPipeline(nil, func(ctx context.Context, msg sink.Message) error {
 		return mockSink.Send(ctx, msg)
 	})
-	recv := newReceiverHarness(t, authN, func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error {
+	recv := newReceiverHarness(t, authN, func(ctx context.Context, raw []byte, samples []parser.Sample) error {
 		meta, _ := parser.MetaFromContext(ctx)
 		return pipe.Process(ctx, samples, raw, sink.Message{
-			Topic:   defaultTopic,
-			Key:     []byte(meta.Tenant),
+			Topic:   "", // 无 ruleset, 空 topic 不影响(空 ruleset 直接走默认行为)
+			Key:     []byte(meta.Business),
 			Headers: map[string]string{},
 		})
 	})
@@ -251,7 +251,7 @@ func TestRule_DefaultFallbackWhenNoRules(t *testing.T) {
 	req := makeWriteRequestFromSamples("m", nil, 1, 1)
 	resp := recv.postRemoteWrite(t, "tk_app_business", encodeWriteRequest(req), nil)
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -265,6 +265,6 @@ func TestRule_DefaultFallbackWhenNoRules(t *testing.T) {
 		}
 	}()
 	wg.Wait()
-	assert.Equal(t, "prom.raw.app_business", mockSink.Messages()[0].Topic,
-		"无规则时,走 default_topic(token 关联的)")
+	assert.Equal(t, "", mockSink.Messages()[0].Topic,
+		"无 ruleset 且 msg.Topic 也为空时,最终 topic 为空(生产环境必须有 ruleset.DefaultTopic 兜底)")
 }

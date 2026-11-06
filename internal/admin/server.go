@@ -83,10 +83,9 @@ type RuleSetDetail struct {
 
 // BusinessInfo business 元数据(不含 token)。
 type BusinessInfo struct {
-	Business     string `json:"business"`
-	BusinessID   string `json:"business_id,omitempty"`
-	DefaultTopic string `json:"default_topic"`
-	RateLimit    int    `json:"rate_limit"`
+	Business   string `json:"business"`
+	BusinessID string `json:"business_id,omitempty"`
+	RateLimit  int    `json:"rate_limit"`
 }
 
 // StatsResp 统计。

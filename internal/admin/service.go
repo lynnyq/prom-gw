@@ -230,10 +230,9 @@ func (s *ManagerService) ListBusinesses(_ context.Context) []BusinessInfo {
 	out := make([]BusinessInfo, 0, len(src))
 	for _, t := range src {
 		out = append(out, BusinessInfo{
-			Business:     t.Name,
-			BusinessID:   t.BusinessID,
-			DefaultTopic: t.DefaultTopic,
-			RateLimit:    t.RateLimit,
+			Business:   t.Name,
+			BusinessID: t.BusinessID,
+			RateLimit:  t.RateLimit,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Business < out[j].Business })

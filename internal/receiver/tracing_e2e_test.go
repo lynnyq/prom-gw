@@ -106,7 +106,7 @@ func newTracingE2ESetup(t *testing.T) *tracingE2ESetup {
 
 	// 5. 鉴权 stub
 	a := &stubAuth{tokens: map[string]auth.Business{
-		"good": {Name: "t1", DefaultTopic: "prom.raw.t1", RateLimit: 100000},
+		"good": {Name: "t1", RateLimit: 100000},
 	}}
 
 	// 6. receiver(handler 走 rule.Process,并注入 traceparent)
@@ -114,7 +114,7 @@ func newTracingE2ESetup(t *testing.T) *tracingE2ESetup {
 		Authenticator: a,
 		Logger:        zap.NewNop(),
 		SourceDC:      "dc-test",
-		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample, defaultTopic string) error {
+		Handler: func(ctx context.Context, raw []byte, samples []parser.Sample) error {
 			meta, _ := parser.MetaFromContext(ctx)
 			headers := map[string]string{
 				"business":    meta.Business,
@@ -123,7 +123,7 @@ func newTracingE2ESetup(t *testing.T) *tracingE2ESetup {
 			// 与 main.go 一致:InjectTraceparent 把当前 trace 写进 header
 			tracex.InjectTraceparent(ctx, headers)
 			msg := sink.Message{
-				Topic:   defaultTopic,
+				Topic:   "",
 				Key:     []byte(meta.Business),
 				Headers: headers,
 			}
@@ -288,13 +288,13 @@ func TestE2E_Tracing_HandlerError_RecordsError(t *testing.T) {
 	})
 
 	a := &stubAuth{tokens: map[string]auth.Business{
-		"good": {Name: "t1", DefaultTopic: "t1", RateLimit: 100000},
+		"good": {Name: "t1", RateLimit: 100000},
 	}}
 	srv, err := New(Config{
 		Authenticator: a,
 		Logger:        zap.NewNop(),
 		SourceDC:      "dc-test",
-		Handler: func(_ context.Context, _ []byte, _ []parser.Sample, _ string) error {
+		Handler: func(_ context.Context, _ []byte, _ []parser.Sample) error {
 			return assert.AnError
 		},
 	})

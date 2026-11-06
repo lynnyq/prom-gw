@@ -22,27 +22,27 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestLoadFile_AppBusinessYAML(t *testing.T) {
-	// 校验仓库根目录的 configs/rules/app-business.yaml 合法可加载可编译
+func TestLoadFile_SysidRoutingYAML(t *testing.T) {
+	// 校验仓库根目录的 configs/rules/sysid-routing.yaml 合法可加载可编译
 	// 不依赖 cwd:用相对于当前测试文件的路径
 	repoRoot := findRepoRoot(t)
-	path := filepath.Join(repoRoot, "configs", "rules", "app-business.yaml")
+	path := filepath.Join(repoRoot, "configs", "rules", "sysid-routing.yaml")
 	cfg, err := LoadFile(path)
 	require.NoError(t, err, "LoadFile 失败: %v", err)
 	require.NotNil(t, cfg)
 	require.Len(t, cfg.Rulesets, 1, "应解析出 1 个 ruleset")
 	rs := cfg.Rulesets[0]
-	assert.Equal(t, "app-business", rs.Name)
-	assert.Equal(t, "app-business", rs.Business)
+	assert.Equal(t, "sysid-routing", rs.Name)
+	assert.Equal(t, "s-systems", rs.Business)
 	assert.Equal(t, "", rs.SourceTopic, "input_topic 已废弃,应为空")
-	assert.Equal(t, "prom.bj.routed.app_business", rs.DefaultTopic)
+	assert.Equal(t, "prom.local.routed.default", rs.DefaultTopic)
 	assert.Equal(t, int64(1), rs.Version)
 	// 3 个 stage:relabel / route / sample
 	assert.Equal(t, []string{"relabel", "route", "sample"}, stageTypes(rs.Stages))
 
 	compiled, err := Compile(&rs)
 	require.NoError(t, err)
-	assert.Equal(t, "app-business", compiled.RuleSet.Name)
+	assert.Equal(t, "sysid-routing", compiled.RuleSet.Name)
 	assert.Equal(t, 3, len(compiled.Stages))
 }
 
@@ -122,20 +122,17 @@ rulesets:
 	assert.Error(t, err, "找不到的 ruleset 应返回 error")
 }
 
-func TestPipeline_AppBusinessE2E(t *testing.T) {
-	// 加载 app-business.yaml,跑完整流水线:
+func TestPipeline_SysidRoutingE2E(t *testing.T) {
+	// 加载 sysid-routing.yaml,跑完整流水线:
 	//   - relabel 删 env/instance/pod
-	//   - route 按 team 分流
-	//   - sample 概率丢弃
-	//
-	// 概率采样是随机的,用 200 个 sample 让 rate=0.1 的预期 ~20 条命中,
-	// 用 [5, 60] 的宽区间避免偶发抖动导致 flake。
+	//   - route 按 sysid 分流
+	//   - sample rate=1.0 全量保留
 	repoRoot := findRepoRoot(t)
-	path := filepath.Join(repoRoot, "configs", "rules", "app-business.yaml")
+	path := filepath.Join(repoRoot, "configs", "rules", "sysid-routing.yaml")
 	cfg, err := LoadFile(path)
 	require.NoError(t, err)
 
-	rs, err := CompileConfig(cfg, "app-business")
+	rs, err := CompileConfig(cfg, "sysid-routing")
 	require.NoError(t, err)
 	t.Logf("ruleset stages: %d", len(rs.Stages))
 	for i, s := range rs.Stages {
@@ -153,15 +150,15 @@ func TestPipeline_AppBusinessE2E(t *testing.T) {
 	})
 	p.SetRules(rs)
 
-	// 构造样本:4 种 team,每种 50 条 = 200 条
-	teams := []string{"core", "infra", "data", "unknown"}
+	// 构造样本:3 种 sysid,每种 20 条 = 60 条
+	sysids := []string{"s001", "s002", "unknown"}
 	var samples []parser.Sample
-	for i := 0; i < 50; i++ {
-		for _, team := range teams {
+	for i := 0; i < 20; i++ {
+		for _, sid := range sysids {
 			samples = append(samples, parser.Sample{
 				Metric: "app_requests_total",
 				Labels: []parser.Label{
-					{Name: "team", Value: team},
+					{Name: "sysid", Value: sid},
 					{Name: "job", Value: "api"},
 					{Name: "env", Value: "prod"},      // 应被 relabel 删除
 					{Name: "instance", Value: "host"}, // 应被 relabel 删除
@@ -171,31 +168,22 @@ func TestPipeline_AppBusinessE2E(t *testing.T) {
 	}
 	t.Logf("input samples: %d", len(samples))
 
-	err = p.Process(context.Background(), samples, []byte("raw"), sink.Message{Topic: "ignored"})
+	err = p.Process(context.Background(), samples, []byte("raw"), sink.Message{Topic: ""})
 	require.NoError(t, err)
 
-	// 4 种 team 全部跑 relabel+route,经过 sample(0.1) 后约 20 条命中
-	// 实际可能 5~60 区间,避免随机 flake
-	assert.GreaterOrEqual(t, len(captured), 5, "rate=0.1 × 200 sample,期望至少 5 条被投递")
-	assert.LessOrEqual(t, len(captured), 60, "rate=0.1 × 200 sample,期望不超过 60 条")
+	// rate=1.0 全量保留,60 条应全部投递
+	assert.Equal(t, 60, len(captured), "rate=1.0 × 60 sample,应全部投递")
 
-	// 检查路由覆盖:core/infra/data/default topic 至少应出现 1 次
-	// (若某 team 全部被 sample 丢弃,topic 不会出现 → 测试容错)
+	// 检查路由覆盖:s001/s002/default topic 应各出现 20 次
 	topics := map[string]int{}
 	for _, m := range captured {
 		topics[m.Topic]++
 	}
 	t.Logf("captured topics distribution: %v", topics)
 
-	// 至少有一个 known 路由被命中
-	known := []string{"prom.bj.routed.core", "prom.bj.routed.infra", "prom.bj.routed.data", "prom.bj.routed.app_business"}
-	hits := 0
-	for _, k := range known {
-		if topics[k] > 0 {
-			hits++
-		}
-	}
-	assert.GreaterOrEqual(t, hits, 1, "至少应有一个 topic 被命中")
+	assert.Equal(t, 20, topics["prom.local.routed.s001"], "s001 应路由到对应 topic")
+	assert.Equal(t, 20, topics["prom.local.routed.s002"], "s002 应路由到对应 topic")
+	assert.Equal(t, 20, topics["prom.local.routed.default"], "未知 sysid 应走 default topic")
 
 	// 投递消息的 payload 必须等于入参 raw(原样传递)
 	for _, m := range captured {

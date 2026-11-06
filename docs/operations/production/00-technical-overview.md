@@ -135,15 +135,16 @@ HTTP Body (snappy+protobuf)
 ```
 prom.<city>.<category>
        │       │
-       │       └── 业务分类:routed.core / routed.infra / routed.data / routed.app_business / dlq.sr.5m
+       │       └── 业务分类:routed.<sysid> / routed.default / dlq.sr.5m
        └────────── 城市:bj(北京)/ sz(深圳)/ hf(合肥)/ local(开发环境)
 ```
 
 **设计原则**:
 
 1. **城市维度隔离**:每城独立 Kafka 集群,topic 名带城市前缀,避免跨城误消费
-2. **按团队分桶**:按 `team` 标签将数据路由到 `core`/`infra`/`data`/`app_business` 等独立 topic,便于按业务域并行消费
-3. **DLQ 独立**:死信队列单独 topic,分区数少(8),留存时间长(7 天),便于运维重放
+2. **按 S 系统 ID 分桶**:按 `sysid` 标签将数据路由到 `prom.<city>.routed.<sysid>` 独立 topic,每 S 系统一 topic,Flink 按 sysid 映射到不同 StarRocks 表
+3. **unknown sysid 可配置兜底**:未命中规则的 sysid 可选择写入 `routed.default` 兜底桶(便于排查新 S 系统未配置的情况),或置空串 strict 模式直接丢弃
+4. **DLQ 独立**:死信队列单独 topic,分区数少(8),留存时间长(7 天),便于运维重放
 
 > **架构说明**:prom-gw 采用**单进程同步处理**,收到 Prometheus remote_write 后在进程内完成 relabel + route,直接写入目标 topic。**不存在 raw → routed 两阶段异步消费**,无需 raw topic 中转。
 
@@ -151,31 +152,31 @@ prom.<city>.<category>
 
 **数据 topic(prom-gw 同步写入)**
 
-prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清洗)+ route(按 team 分桶),直接将原始 snappy+protobuf body 写入对应的 topic。payload 未经修改,附加了路由 headers(`business`、`source_dc`、`ingest_city` 等)。
+prom-gw 收到 Prometheus remote_write 后,在进程内执行 relabel(标签清洗)+ route(按 sysid 分桶),直接将原始 snappy+protobuf body 写入对应的 topic。payload 未经修改,附加了路由 headers(`business`、`source_dc`、`ingest_city` 等)。
 
 | Topic | 写入方 | 路由规则 | 消费方 | 用途 |
 |-------|--------|---------|--------|------|
-| `prom.bj.routed.core` | prom-gw | `team=core` | Flink (core 聚合作业) | 核心业务指标(订单/支付/账户) |
-| `prom.bj.routed.infra` | prom-gw | `team=infra` | Flink (infra 聚合作业) | 基础设施指标(主机/网络) |
-| `prom.bj.routed.data` | prom-gw | `team=data` | Flink (data 聚合作业) | 数据平台指标(离线/实时计算) |
-| `prom.bj.routed.app_business` | prom-gw | `team` 未命中规则兜底 | Flink (app_business 聚合作业) | 通用业务指标兜底桶 |
 | `prom.bj.routed.<sysid>` | prom-gw | `sysid=<sysid>` | Flink (sysid 分表作业) | S 系统按 sysid 分桶(如 s001/s002),每 sysid 一 topic |
 | `prom.bj.routed.default` | prom-gw | `sysid` 未命中规则兜底 | Flink (sysid 分表作业) | S 系统未匹配 sysid 的兜底桶 |
 
-> **配置位置**:[configs/rules/app-business.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml) 的 `route.rules` 和 `default_topic` 字段。S 系统 sysid 路由见 [configs/rules/sysid-routing.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/sysid-routing.yaml)。
+> **配置位置**:[configs/rules/sysid-routing.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/sysid-routing.yaml)(本地开发模板)、[configs/rules/bj/default.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/bj/default.yaml)(北京生产)的 `route.rules` 和 `default_topic` 字段。
 
-**路由规则示例**(来自 [app-business.yaml:29-36](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/app-business.yaml#L29-L36)):
+**路由规则示例**(来自 [configs/rules/sysid-routing.yaml](file:///Users/yangqian/go/src/github.com/lynnyq/prom-gw/configs/rules/sysid-routing.yaml)):
 
 ```yaml
-- type: route
-  rules:
-    - match: { team: "core" }   # 核心业务团队 → prom.bj.routed.core
-      topic: prom.bj.routed.core
-    - match: { team: "infra" }  # 基础设施团队 → prom.bj.routed.infra
-      topic: prom.bj.routed.infra
-    - match: { team: "data" }   # 数据团队 → prom.bj.routed.data
-      topic: prom.bj.routed.data
-  # default_topic: prom.bj.routed.app_business  (兜底桶)
+- name: sysid-routing
+  business: s-systems
+  default_topic: prom.local.routed.default  # 未命中 sysid 时的兜底 topic
+  stages:
+    - type: route
+      rules:
+        - match: { sysid: "s001" }   # S 系统 s001 → prom.local.routed.s001
+          topic: prom.local.routed.s001
+        - match: { sysid: "s002" }   # S 系统 s002 → prom.local.routed.s002
+          topic: prom.local.routed.s002
+        # 新增 S 系统示例:
+        # - match: { sysid: "s003" }
+        #   topic: prom.local.routed.s003
 ```
 
 **死信队列 topic(Flink 写入)**
@@ -190,17 +191,13 @@ DLQ topic 中消息格式为 JSON,包含原始 AggResult、label(用于幂等去
 
 | Topic | 分区 | 副本 | 留存 | 写入方 | 消费方 | 说明 |
 |-------|------|------|------|--------|--------|------|
-| `prom.bj.routed.core` | 64 | 3 | 3 天 | prom-gw | Flink (core 作业) | 核心业务数据(team=core) |
-| `prom.bj.routed.infra` | 64 | 3 | 3 天 | prom-gw | Flink (infra 作业) | 基础设施数据(team=infra) |
-| `prom.bj.routed.data` | 64 | 3 | 3 天 | prom-gw | Flink (data 作业) | 数据平台数据(team=data) |
-| `prom.bj.routed.app_business` | 64 | 3 | 3 天 | prom-gw | Flink (app_business 作业) | 通用业务兜底桶 |
 | `prom.bj.routed.<sysid>` | 64 | 3 | 3 天 | prom-gw | Flink (sysid 分表作业) | S 系统按 sysid 分桶,每 sysid 一 topic |
 | `prom.bj.routed.default` | 64 | 3 | 3 天 | prom-gw | Flink (sysid 分表作业) | S 系统 sysid 兜底桶 |
 | `prom.bj.dlq.sr.5m` | 8 | 3 | 7 天 | Flink StarRocksSink | DLQ 重放工具 | Stream Load 失败死信队列 |
 
 深圳(`sz`)、合肥(`hf`)同理,分别使用 `prom.sz.*` 和 `prom.hf.*` 前缀。
 
-**三城 topic 总数**:每城 5 个(基础业务 topic)+ N 个(sysid topic,按 S 系统数量)+ 1 个(default 兜底)× 3 城。sysid topic 数量随 S 系统接入数动态增长,新增 S 系统只需预创建 topic 并修改 prom-gw 路由配置,无需改代码。
+**每城 topic 总数**:(N 个 sysid topic + 1 个 default 兜底 + 1 个 DLQ),其中 N 随 S 系统接入数动态增长。新增 S 系统只需预创建 topic 并修改 prom-gw 路由配置,无需改代码。
 
 #### 2.3.4 数据流向
 
@@ -212,7 +209,6 @@ Prometheus
 │ prom-gw (单进程同步处理)                        │
 │   1. receiver: 验证 token                      │
 │   2. rule engine: relabel + route + sample     │
-│      - 按 team 路由 → core/infra/data/app_business
 │      - 按 sysid 路由 → s001/s002/.../default   │
 │   3. sink: 直接写入 Kafka (routed topic)        │
 │   失败时:写入 WAL 降级,后续自动回灌            │
@@ -220,12 +216,10 @@ Prometheus
   │
   ▼
 ┌─────────────────────────────┐
-│ prom.bj.routed.core         │  ← prom-gw 直接写入
-│ prom.bj.routed.infra        │     payload = 原始 snappy+protobuf body
-│ prom.bj.routed.data         │     headers = {business, source_dc, ingest_city}
-│ prom.bj.routed.app_business │     (team 兜底桶)
-│ prom.bj.routed.s001         │  ← sysid 分桶(S 系统 001)
-│ prom.bj.routed.s002         │  ← sysid 分桶(S 系统 002)
+│ prom.bj.routed.s001         │  ← prom-gw 直接写入
+│ prom.bj.routed.s002         │     payload = 原始 snappy+protobuf body
+│ prom.bj.routed.s003         │     headers = {business, source_dc, ingest_city}
+│ ...                         │
 │ prom.bj.routed.default      │     (sysid 兜底桶)
 └─────────────────────────────┘
   │ Flink KafkaSource 消费
@@ -237,9 +231,9 @@ Prometheus
   │   6. Stream Load → StarRocks
   ▼
 StarRocks
-  ├─ metrics_5m (单表模式,team 业务)
   ├─ metrics_s001_5m (sysid=s001)
   ├─ metrics_s002_5m (sysid=s002)
+  ├─ metrics_s003_5m (sysid=s003)
   └─ metrics_default_5m (sysid 兜底)
   │
   │ 若 Stream Load 失败 3 次
