@@ -1,16 +1,14 @@
 # 本地 Token 列表,启动时加载、SIGHUP 重载。
 # business_id 预留未来 IAM 主键,v1 可不填。
-# 注意: 此文件可入仓(开发 / 测试用),生产请用 configs/tokens.local.yaml(.gitignore 已排除)。
+# 注意: 此文件可入仓(开发 / 测试用),生产请用 configs/tokens/<city>.yaml。
 #
 # token 只负责鉴权(身份 + 限流),topic 路由完全由 rules
 # (ruleset.default_topic + route stage) 负责,不再在此处配置。
+#
+# 架构:单一 business "s-systems" 覆盖所有 S 系统,
+#       具体 topic 由 sysid-routing ruleset 按 sysid 分桶。
 tokens:
-  "tk_app_business_dev":
-    business: app-business
-    business_id: "1001"
-    rate_limit: 80000
-
-  "tk_infra_dev":
-    business: infra
-    business_id: "1002"
-    rate_limit: 50000
+  "tk_systems_dev":
+    business: s-systems
+    business_id: "1003"
+    rate_limit: 200000

@@ -15,6 +15,7 @@ import (
 	"math/rand/v2"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/lynnyq/prom-gw/internal/obs"
@@ -186,6 +187,9 @@ func (RouteStage) Compile(cfg map[string]interface{}) (StageApplyFunc, error) {
 //     topic: prom.core
 //
 // to_topic(design)和 topic(旧版)都支持;to_topic 优先。
+//
+// 大小写处理:match 字典的 value 在编译期统一转小写,
+// matchAll 比较时 sample label 的 value 也转小写 → 匹配大小写不敏感。
 func buildRouteRules(cfg map[string]interface{}) []routeRule {
 	// 优先:rules 数组(旧版,支持多条)
 	rulesRaw, _ := cfg["rules"].([]interface{})
@@ -202,7 +206,7 @@ func buildRouteRules(cfg map[string]interface{}) []routeRule {
 				continue
 			}
 			out = append(out, routeRule{
-				match: toStringMap(match),
+				match: toLowerStringMap(match),
 				topic: topic,
 			})
 		}
@@ -219,7 +223,7 @@ func buildRouteRules(cfg map[string]interface{}) []routeRule {
 		return nil
 	}
 	return []routeRule{{
-		match: toStringMap(matchRaw),
+		match: toLowerStringMap(matchRaw),
 		topic: topic,
 	}}
 }
@@ -245,6 +249,22 @@ func toStringMap(in map[string]interface{}) map[string]string {
 	return out
 }
 
+// toLowerStringMap 把 map[string]interface{} 转为 map[string]string,
+// 所有 value 统一转小写(用于 route stage 大小写不敏感匹配)。
+func toLowerStringMap(in map[string]interface{}) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		if s, ok := v.(string); ok {
+			out[k] = strings.ToLower(s)
+		}
+	}
+	return out
+}
+
+// matchAll 判断 labels 是否满足 m 中所有键值对。
+//
+// 大小写处理:route stage 编译期 match value 已归一化为小写,
+// label value 运行时也转小写比较 → 对 sysid 等 ID 标签大小写不敏感。
 func matchAll(labels []parser.Label, m map[string]string) bool {
 	if len(m) == 0 {
 		return false
@@ -252,7 +272,7 @@ func matchAll(labels []parser.Label, m map[string]string) bool {
 	for k, v := range m {
 		found := false
 		for _, l := range labels {
-			if l.Name == k && l.Value == v {
+			if l.Name == k && strings.EqualFold(l.Value, v) {
 				found = true
 				break
 			}

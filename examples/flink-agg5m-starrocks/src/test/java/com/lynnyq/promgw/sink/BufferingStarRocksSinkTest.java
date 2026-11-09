@@ -6,6 +6,7 @@ import com.lynnyq.promgw.aggregate.AggResult;
 import java.lang.reflect.Field;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Test;
  *   1. buildBatchLabel 必须对每次 flush 生成不同 label(batchSeq 递增)
  *   2. buildRowLabel 必须对不同 series 生成不同 label(含完整 labels_hash)
  *   3. label 跨 subtask 不碰撞(taskIndex 参与)
+ *   4. resolveTable 对 sysid 查找大小写不敏感
  */
 class BufferingStarRocksSinkTest {
 
@@ -25,6 +27,13 @@ class BufferingStarRocksSinkTest {
                 "127.0.0.1", 8030, "observability", "metrics_5m",
                 "root", "", true, "sz_5m", null,
                 500, 10_000L);
+    }
+
+    private BufferingStarRocksSink createSinkWithSysidMapping(Map<String, String> mapping, String defaultTable) {
+        return new BufferingStarRocksSink(
+                "127.0.0.1", 8030, "observability", "metrics_5m",
+                "root", "", true, "sz_5m", null,
+                500, 10_000L, mapping, defaultTable);
     }
 
     private void initLabelFmt(BufferingStarRocksSink sink) throws Exception {
@@ -134,5 +143,102 @@ class BufferingStarRocksSinkTest {
         AggResult r = makeResult("team_alpha", null);
         String label = sink.buildRowLabel(r);
         assertThat(label).endsWith("0000000000000000");
+    }
+
+    // ============ resolveTable 大小写不敏感测试 ============
+
+    private AggResult makeResultWithSysid(String sysid) {
+        AggResult r = new AggResult();
+        r.setTs(new Date(1724544000000L));
+        r.setSysid(sysid);
+        r.setBusiness("team_alpha");
+        r.setLabelsHash("abcd1234");
+        Map<String, String> labels = new LinkedHashMap<>();
+        labels.put("__name__", "up");
+        labels.put("sysid", sysid);
+        r.setLabels(labels);
+        return r;
+    }
+
+    @Test
+    void resolveTableLowerCaseMatch() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        mapping.put("s002", "metrics_s002_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        // 小写 sysid
+        AggResult r = makeResultWithSysid("s001");
+        assertThat(sink.resolveTable(r)).isEqualTo("metrics_s001_5m");
+    }
+
+    @Test
+    void resolveTableUpperCaseMatch() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        // 大写 sysid → 应匹配到小写 key
+        AggResult r = makeResultWithSysid("S001");
+        assertThat(sink.resolveTable(r))
+                .as("sysid 大写时应大小写不敏感匹配")
+                .isEqualTo("metrics_s001_5m");
+    }
+
+    @Test
+    void resolveTableMixedCaseMatch() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        // 混合大小写 sysid → 应匹配到小写 key
+        AggResult r = makeResultWithSysid("S001");
+        assertThat(sink.resolveTable(r)).isEqualTo("metrics_s001_5m");
+
+        AggResult r2 = makeResultWithSysid("s001");
+        assertThat(sink.resolveTable(r2)).isEqualTo("metrics_s001_5m");
+    }
+
+    @Test
+    void resolveTableMappingKeyUpperCaseAlsoWorks() {
+        // 就算配置文件里 sysidTableMap 的 key 是大写,构造时也会归一化为小写
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("S001", "metrics_s001_5m");  // 大写 key
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        AggResult r = makeResultWithSysid("s001");  // 小写 sysid
+        assertThat(sink.resolveTable(r))
+                .as("配置 key 大写也应能匹配小写 sysid(构造时已归一化)")
+                .isEqualTo("metrics_s001_5m");
+    }
+
+    @Test
+    void resolveTableUnknownSysidFallsToDefault() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        AggResult r = makeResultWithSysid("UNKNOWN_SYSID");
+        assertThat(sink.resolveTable(r)).isEqualTo("metrics_default_5m");
+    }
+
+    @Test
+    void resolveTableNullSysidFallsToDefault() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        AggResult r = makeResultWithSysid(null);
+        assertThat(sink.resolveTable(r)).isEqualTo("metrics_default_5m");
+    }
+
+    @Test
+    void resolveTableEmptySysidFallsToDefault() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("s001", "metrics_s001_5m");
+        BufferingStarRocksSink sink = createSinkWithSysidMapping(mapping, "metrics_default_5m");
+
+        AggResult r = makeResultWithSysid("");
+        assertThat(sink.resolveTable(r)).isEqualTo("metrics_default_5m");
     }
 }

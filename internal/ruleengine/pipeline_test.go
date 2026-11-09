@@ -20,8 +20,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gogo/protobuf/proto"
+	"github.com/klauspost/compress/snappy"
 	"github.com/lynnyq/prom-gw/internal/parser"
 	"github.com/lynnyq/prom-gw/internal/sink"
+	"github.com/prometheus/prometheus/prompb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -306,4 +309,198 @@ func TestProcess_RelabelStage_DropsLabels(t *testing.T) {
 	_ = captured
 	// Process 行为正确即可,具体 labels 通过 _ = captured 占位。
 	// 详细断言在 stage 单测内做。
+}
+
+// TestProcess_PerTopicPayloadIsolated 验证多 topic 路由时每个 topic 的 payload 只包含匹配的 TimeSeries。
+//
+// 根因修复回归测试: 原实现把完整 WriteRequest (含所有 series) 发给每个 topic,
+// 导致 topic 污染。本测试构造真实 prompb.WriteRequest,验证修复后隔离正确。
+func TestProcess_PerTopicPayloadIsolated(t *testing.T) {
+	// 1. 构造包含 3 个 TimeSeries 的 WriteRequest
+	req := &prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			// series A: sysid=s001
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "cpu_usage"},
+					{Name: "sysid", Value: "s001"},
+				},
+				Samples: []prompb.Sample{{Value: 1.0, Timestamp: 1000}},
+			},
+			// series B: sysid=s002
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "memory_usage"},
+					{Name: "sysid", Value: "s002"},
+				},
+				Samples: []prompb.Sample{{Value: 2.0, Timestamp: 1000}},
+			},
+			// series C: sysid=s003 (unknown → fallback)
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "disk_io"},
+					{Name: "sysid", Value: "s003"},
+				},
+				Samples: []prompb.Sample{{Value: 3.0, Timestamp: 1000}},
+			},
+		},
+	}
+	protoBytes, err := proto.Marshal(req)
+	require.NoError(t, err)
+	raw := snappy.Encode(nil, protoBytes)
+
+	// 2. 构造对应的 parser.Samples(route stage 已处理完,TargetTopic 已设好)
+	samples := []parser.Sample{
+		{
+			Metric:   "cpu_usage",
+			Labels:   []parser.Label{{Name: "sysid", Value: "s001"}},
+			Value:    1.0,
+			TargetTopic: "prom.s001",
+		},
+		{
+			Metric:   "memory_usage",
+			Labels:   []parser.Label{{Name: "sysid", Value: "s002"}},
+			Value:    2.0,
+			TargetTopic: "prom.s002",
+		},
+		{
+			Metric:   "disk_io",
+			Labels:   []parser.Label{{Name: "sysid", Value: "s003"}},
+			Value:    3.0,
+			TargetTopic: "prom.default",
+		},
+	}
+
+	// 3. 用无 stages 的 Pipeline(跳过 route stage,直接 dispatch)
+	pipe := NewPipeline(zap.NewNop(), func(_ context.Context, m sink.Message) error { return nil })
+	pipe.SetRules(&CompiledRuleSet{
+		RuleSet: RuleSet{Name: "test", DefaultTopic: "fallback", Version: 1},
+		Stages:  nil, // 无 stages → samples 直接进入 dispatch
+	})
+
+	// 4. 拦截 out 函数,捕获每个 topic 的 payload
+	var captured []sink.Message
+	var mu sync.Mutex
+	pipe2 := NewPipeline(zap.NewNop(), func(_ context.Context, m sink.Message) error {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, m)
+		return nil
+	})
+	pipe2.SetRules(&CompiledRuleSet{
+		RuleSet: RuleSet{Name: "test", DefaultTopic: "fallback", Version: 1},
+		Stages:  nil,
+	})
+
+	err = pipe2.Process(context.Background(), samples, raw, sink.Message{Topic: "ignored"})
+	require.NoError(t, err)
+
+	// 5. 验证投递数: 3 个 sample → 3 条消息
+	require.Equal(t, 3, len(captured))
+
+	// 6. 按 topic 分组 payload,验证每个 topic 只含匹配的 TimeSeries
+	topicPayloads := make(map[string][]byte, 3)
+	for _, m := range captured {
+		if existing, ok := topicPayloads[m.Topic]; ok {
+			// 同一 topic 的多条消息 payload 必须相同
+			assert.Equal(t, existing, m.Payload, "同 topic 多条消息 payload 应一致")
+		} else {
+			topicPayloads[m.Topic] = m.Payload
+		}
+	}
+
+	require.Len(t, topicPayloads, 3, "应产生 3 个不同 topic 的 payload")
+
+	// 7. 解码每个 topic 的 payload,验证 TimeSeries 内容
+	for topic, payload := range topicPayloads {
+		decoded, err := snappy.Decode(nil, payload)
+		require.NoError(t, err, "topic %s payload snappy 解码失败", topic)
+		var perTopicReq prompb.WriteRequest
+		err = proto.Unmarshal(decoded, &perTopicReq)
+		require.NoError(t, err, "topic %s payload protobuf 解码失败", topic)
+
+		switch topic {
+		case "prom.s001":
+			assert.Equal(t, 1, len(perTopicReq.Timeseries), "s001 topic 应只有 1 个 TimeSeries")
+			assert.Equal(t, "cpu_usage", findMetricName(perTopicReq.Timeseries[0]))
+		case "prom.s002":
+			assert.Equal(t, 1, len(perTopicReq.Timeseries), "s002 topic 应只有 1 个 TimeSeries")
+			assert.Equal(t, "memory_usage", findMetricName(perTopicReq.Timeseries[0]))
+		case "prom.default":
+			assert.Equal(t, 1, len(perTopicReq.Timeseries), "default topic 应只有 1 个 TimeSeries")
+			assert.Equal(t, "disk_io", findMetricName(perTopicReq.Timeseries[0]))
+		default:
+			t.Errorf("unexpected topic: %s", topic)
+		}
+	}
+
+	// 8. 交叉验证: 各 topic payload 不应包含其他 sysid 的 series
+	s001Payload := topicPayloads["prom.s001"]
+	s002Payload := topicPayloads["prom.s002"]
+	defaultPayload := topicPayloads["prom.default"]
+	assert.NotEqual(t, s001Payload, s002Payload, "不同 topic payload 应不同")
+	assert.NotEqual(t, s001Payload, defaultPayload, "不同 topic payload 应不同")
+	assert.NotEqual(t, s002Payload, defaultPayload, "不同 topic payload 应不同")
+}
+
+// TestProcess_SingleTopicFastPath 验证单 topic 时走 fast path(raw 不变)。
+func TestProcess_SingleTopicFastPath(t *testing.T) {
+	req := &prompb.WriteRequest{
+		Timeseries: []prompb.TimeSeries{
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "cpu"},
+					{Name: "sysid", Value: "s001"},
+				},
+				Samples: []prompb.Sample{{Value: 1.0}},
+			},
+			{
+				Labels: []prompb.Label{
+					{Name: "__name__", Value: "mem"},
+					{Name: "sysid", Value: "s001"},
+				},
+				Samples: []prompb.Sample{{Value: 2.0}},
+			},
+		},
+	}
+	protoBytes, err := proto.Marshal(req)
+	require.NoError(t, err)
+	raw := snappy.Encode(nil, protoBytes)
+
+	samples := []parser.Sample{
+		{Metric: "cpu", Labels: []parser.Label{{Name: "sysid", Value: "s001"}}, TargetTopic: "prom.s001"},
+		{Metric: "mem", Labels: []parser.Label{{Name: "sysid", Value: "s001"}}, TargetTopic: "prom.s001"},
+	}
+
+	var captured []sink.Message
+	var mu sync.Mutex
+	pipe := NewPipeline(zap.NewNop(), func(_ context.Context, m sink.Message) error {
+		mu.Lock()
+		defer mu.Unlock()
+		captured = append(captured, m)
+		return nil
+	})
+	pipe.SetRules(&CompiledRuleSet{
+		RuleSet: RuleSet{Name: "test", DefaultTopic: "fallback", Version: 1},
+		Stages:  nil,
+	})
+
+	err = pipe.Process(context.Background(), samples, raw, sink.Message{Topic: "ignored"})
+	require.NoError(t, err)
+
+	require.Equal(t, 2, len(captured))
+	// 单 topic fast path: payload 应等于原始 raw(未重编码)
+	for _, m := range captured {
+		assert.Equal(t, raw, m.Payload, "单 topic fast path: payload 应与原始 raw 一致")
+	}
+}
+
+// findMetricName 从 prompb.TimeSeries 中提取 __name__ label 值。
+func findMetricName(ts prompb.TimeSeries) string {
+	for _, l := range ts.Labels {
+		if l.Name == "__name__" {
+			return l.Value
+		}
+	}
+	return ""
 }

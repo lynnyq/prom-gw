@@ -3,6 +3,7 @@ package com.lynnyq.promgw.aggregate;
 import com.lynnyq.promgw.decoder.PromSample;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
@@ -32,7 +33,9 @@ public class ExpandWriteRequest implements FlatMapFunction<PromSample, SampleWit
             }
             // 一个 series 通常 1 个 sample,但可能多个,逐个输出
             // sysid 是 Prometheus 公共标签,从 series labels 中提取,用于 StarRocks 表路由
-            String sysid = series.getLabels() != null ? series.getLabels().get("sysid") : null;
+            // 统一转小写,保证大小写不敏感匹配(prom-gw route stage 也做了同样处理)
+            String rawSysid = series.getLabels() != null ? series.getLabels().get("sysid") : null;
+            String sysid = rawSysid != null ? rawSysid.toLowerCase(Locale.ROOT) : null;
             for (PromSample.ParsedSample s : series.getSamples()) {
                 SampleWithMeta swm = new SampleWithMeta(
                         ps.getBusiness(),

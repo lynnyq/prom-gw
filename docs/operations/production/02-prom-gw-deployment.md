@@ -129,7 +129,7 @@ tokens.yaml                    rules.yaml (ruleset)
 ─────────────                  ─────────────────────────────
 tokens:                        rulesets:
   "tk_app_business_prod":         - name: sysid-routing
-    business: app-business          business: s-systems
+    business: app-business             business: s-systems
     business_id: "1001"             default_topic: prom.bj.routed.default
     rate_limit: 80000               stages:
                                       - relabel ...
@@ -317,9 +317,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.observability.hf:4317
 # 热重载: kill -HUP <pid>(无需重启进程)
 #
 # token 与 topic 的对应关系:
-#   tk_app_business_prod → prom.bj.routed.app_business
-#   tk_infra_prod       → prom.bj.routed.infra
-#   tk_systems_prod     → prom.bj.routed.<sysid>(由 ruleset route 决定)
+#   tk_systems_prod → topic 由 sysid-routing ruleset 按 sysid 决定(prom.bj.routed.<sysid>)
 # ============================================================
 tokens:
   # ── app-business 业务 ──
@@ -327,7 +325,6 @@ tokens:
   "tk_app_business_prod":
     business: app-business
     business_id: "1001"
-    default_topic: prom.bj.routed.app_business    # 写入的 topic(ruleset 配置后被覆盖)
     rate_limit: 80000                             # samples/s 上限,超过返回 429
 
   # ── infra 业务 ──
@@ -335,7 +332,6 @@ tokens:
   "tk_infra_prod":
     business: infra
     business_id: "1002"
-    default_topic: prom.bj.routed.infra           # 写入的 topic
     rate_limit: 50000
 
   # ── S 系统(sysid 分桶)业务 ──
@@ -344,7 +340,6 @@ tokens:
   "tk_systems_prod":
     business: s-systems
     business_id: "1003"
-    default_topic: prom.bj.routed.default          # 兜底 topic(ruleset 未命中时使用)
     rate_limit: 100000                             # S 系统总量级较大,放宽限流
 ```
 
@@ -354,24 +349,9 @@ tokens:
 |------|------|------|------|
 | `business` | string | ✅ | business 名,写入 Kafka header `business` 和 metric 标签 |
 | `business_id` | string | 否 | IAM 主键(预留字段,v1 可不填) |
-| `default_topic` | string | ✅ | 初始 topic(ruleset 配置后被 ruleset.default_topic 覆盖) |
 | `rate_limit` | int | 否 | 该 business 的 samples/s 上限。0 或不填 = 不限 |
 
-**多城 token 配置**:每城 prom-gw 实例独立部署,token 配置中 `default_topic` 带城市前缀:
-
-```bash
-# 北京: /appdata/prom-gw/conf/tokens.yaml
-#   default_topic: prom.bj.routed.app_business
-#   default_topic: prom.bj.routed.infra
-
-# 深圳: /appdata/prom-gw/conf/tokens.yaml
-#   default_topic: prom.sz.routed.app_business
-#   default_topic: prom.sz.routed.infra
-
-# 合肥: /appdata/prom-gw/conf/tokens.yaml
-#   default_topic: prom.hf.routed.app_business
-#   default_topic: prom.hf.routed.infra
-```
+> **注意**:token 配置**不再包含** `default_topic`,topic 路由完全由 ruleset 负责(ruleset.default_topic + route rules)。
 
 修改后通过 `kill -HUP <pid>` 热重载,**不重启进程**。
 
@@ -390,98 +370,65 @@ tokens:
 # 热加载: fsnotify 监听文件变化(5s 检测),自动编译+原子切换
 #
 # 路由规则:
-#   app-business business → relabel → route → prom.bj.routed.{core,infra,data,app_business}
-#   infra business        → relabel          → prom.bj.routed.infra
+#   Prometheus remote_write → relabel → route(按 sysid) → prom.bj.routed.<sysid>
+#
+# Prometheus 公共标签字段:
+#   - datacenter  机房
+#   - ip          IP 地址
+#   - job         主机类型(pm 物理机 / vm 虚拟机 / pccmt 容器云平台)
+#   - sproject    S 系统名称
+#   - sysid       S 系统 ID 标识字符串(路由维度)
+#
+# 新增 S 系统:
+#   1. 在下方 stages[].route.rules 中新增 match: { sysid: "<新sysid>" } + topic
+#   2. 在 Kafka 中预创建对应 topic: prom.bj.routed.<新sysid>
+#   3. 下游 Flink 消费后按 sysid 写入不同 StarRocks 表(无需改代码)
 # ============================================================
 rulesets:
-  # ── app-business 租户规则集 ──
-  # 收到 remote_write 后同步处理:relabel + route,直接写入 routed topic
-  - name: app-business
-    business: app-business
-    default_topic: prom.bj.routed.app_business   # 路由未命中时的兜底 topic
-    version: 1
-    match:
-      metric_prefix: ""                         # 空 = 全量接收
-    stages:
-      # Stage 1: relabel - 标签清洗
-      - type: relabel
-        drop_labels:
-          - env                                 # 环境标签(噪音)
-          - instance                            # 实例标签(高基数,用 host 替代)
-          - pod                                 # Pod 名(高基数)
-        keep_labels: []                          # 空 = 关闭白名单
-        label_map:
-          kubernetes_io_cluster: cluster         # 重命名: kubernetes_io_cluster → cluster
-
-      # Stage 2: route - 按 team 标签分桶到不同 topic
-      - type: route
-        rules:
-          - match: { team: "core" }              # 核心业务团队(订单/支付/账户)
-            topic: prom.bj.routed.core
-          - match: { team: "infra" }              # 基础设施团队(主机/网络/监控)
-            topic: prom.bj.routed.infra
-          - match: { team: "data" }              # 数据平台团队(离线/实时计算)
-            topic: prom.bj.routed.data
-          # 未命中以上规则 → 写入 default_topic (prom.bj.routed.app_business)
-
-      # Stage 3: sample - 采样(降低下游存储压力)
-      - type: sample
-        rate: 0.1                                # 保留 10%,生产可按需调整
-
-  # ── infra 租户规则集 ──
-  # 基础设施指标通常不按 team 分桶,直接写入 routed.infra
-  - name: infra
-    business: infra
-    default_topic: prom.bj.routed.infra           # 写入的 topic
-    version: 1
-    match:
-      metric_prefix: ""
-    stages:
-      - type: relabel
-        drop_labels:
-          - env
-          - instance
-      # 无 route stage → 全部写入 default_topic (prom.bj.routed.infra)
-
-  # ── S 系统按 sysid 分桶规则集 ──
-  # Prometheus 公共标签含 sysid(系统ID标识),按 sysid 路由到不同 topic,
-  # 下游 Flink 消费后按 sysid 写入不同 StarRocks 表。
-  # 新增 S 系统只需在此追加 match 规则并预创建对应 topic,无需改代码。
-  # 对应 token: tk_systems_prod (business: s-systems)
+  # ── sysid-routing ruleset ──
+  # 收到 remote_write 后同步处理:relabel + route(按 sysid 分桶),直接写入 routed topic
   - name: sysid-routing
     business: s-systems
-    default_topic: prom.bj.routed.default         # 未匹配 sysid 时的兜底 topic
+    default_topic: prom.bj.routed.default   # 未命中任何已知 sysid 的兜底 topic
     version: 1
     match:
-      metric_prefix: ""                            # 空 = 全量接收
+      metric_prefix: ""                    # 空 = 全量接收
     stages:
-      # Stage 1: relabel - 标签清洗
+      # Stage 1: relabel - 标签清洗(可选,按需保留/删除标签)
       # 注意:不要删除 sysid/sproject/datacenter/ip/job 等公共标签,
       #       下游 Flink 需要 sysid 做表路由。
       - type: relabel
         drop_labels:
-          - env                                    # 环境标签(噪音)
-          - instance                               # 实例标签(高基数,用 ip 替代)
-          - pod                                    # Pod 名(高基数)
-        keep_labels: []                            # 空 = 关闭白名单,仅 drop 生效
+          - env                             # 环境标签(噪音)
+          - instance                        # 实例标签(高基数,用 ip 替代)
+          - pod                             # Pod 名(高基数)
+        keep_labels: []                     # 空 = 关闭白名单
         label_map:
-          kubernetes_io_cluster: cluster           # 重命名示例
+          kubernetes_io_cluster: cluster    # 重命名示例
 
       # Stage 2: route - 按 sysid 标签分桶到不同 topic
+      # 新增 S 系统只需在此 rules 列表追加一条:
+      #   - match: { sysid: "<新sysid>" }
+      #     topic: prom.bj.routed.<新sysid>
       - type: route
         rules:
-          - match: { sysid: "s001" }              # S 系统 001
+          - match: { sysid: "s001" }        # S 系统 s001
             topic: prom.bj.routed.s001
-          - match: { sysid: "s002" }              # S 系统 002
+          - match: { sysid: "s002" }        # S 系统 s002
             topic: prom.bj.routed.s002
-          # 新增 S 系统:追加 match 行 + topic 即可,无需改代码
+          # 新增 S 系统示例(取消注释并替换 sysid 即可启用):
           # - match: { sysid: "s003" }
           #   topic: prom.bj.routed.s003
-          # 未命中 → 写入 default_topic (prom.bj.routed.default)
+          # 未命中以上规则 → 写入 default_topic (prom.bj.routed.default)
+
+      # Stage 3: sample - 采样(降低下游存储压力;生产可按需调整或移除)
+      - type: sample
+        rate: 1.0                           # 1.0 = 全量保留;生产可降到 0.1~0.5
 
 global:
-  rate_limit_per_instance: 100000                # 单实例全局 samples/s 上限
-  channel_buffer: 65535                           # 内部 channel 缓冲区大小
+  rate_limit_per_instance: 100000          # 单实例全局 samples/s 上限
+  channel_buffer: 65535                     # 内部 channel 缓冲区大小
+```
 ```
 
 **stage 执行顺序**(固定,6 个已实现):
@@ -525,12 +472,12 @@ relabel → enrich → route → sample → downsample → deadvalue
 
 ```yaml
 - type: route
-  default_topic: prom.bj.routed.app_business   # route stage 级兜底(可省略,编译时自动用 ruleset.default_topic)
+  default_topic: prom.bj.routed.default        # route stage 级兜底(可省略,编译时自动用 ruleset.default_topic)
   rules:
-    - match: { team: "core", app: "order" }    # 多条件 AND
-      topic: prom.bj.routed.core
-    - match: { team: "infra" }
-      topic: prom.bj.routed.infra
+    - match: { sysid: "s001" }                  # 单条件匹配
+      topic: prom.bj.routed.s001
+    - match: { sysid: "s002" }
+      topic: prom.bj.routed.s002
     # 未命中任何规则 → sample.TargetTopic 仍为空 → Pipeline 用 ruleset.default_topic
 ```
 
@@ -1106,7 +1053,7 @@ sudo chmod 644 /appdata/prom-gw/conf/rules.yaml
 # sudo sed -i 's/prom\.bj\./prom.sz./g' /appdata/prom-gw/conf/rules.yaml  # 深圳机房
 # sudo chmod 644 /appdata/prom-gw/conf/rules.yaml
 #
-# 方式 B:把 sysid-routing ruleset 合并到现有 rules.yaml(与 app-business/infra 共存)
+# 方式 B:把 sysid-routing ruleset 合并到现有 rules.yaml(与 sysid-routing/infra 共存)
 #   把 sysid-routing.yaml 中的 rulesets[0] 追加到 rules.yaml 的 rulesets 列表即可
 #   Manager 按 metric_prefix fan-out,多个 ruleset 并行处理同一批 samples
 
@@ -1328,18 +1275,18 @@ Admin API 监听 **`:8082`**,受 **CIDR 白名单**保护(`--admin-allow-cidr=12
 # 查看所有 ruleset + 当前版本
 curl -s http://127.0.0.1:8082/v1/rulesets
 
-# 查看 app-business ruleset 详情(含 stages/version)
-curl -s http://127.0.0.1:8082/v1/rulesets/app-business
+# 查看 sysid-routing ruleset 详情(含 stages/version)
+curl -s http://127.0.0.1:8082/v1/rulesets/sysid-routing
 
 # 查看 ruleset 变更历史(用于回滚)
-curl -s http://127.0.0.1:8082/v1/rulesets/app-business/history
+curl -s http://127.0.0.1:8082/v1/rulesets/sysid-routing/history
 # 返回:[{"version":1,"ts":"...","md5":"..."},{"version":2,"ts":"...","md5":"..."}]
 
 # 回滚到 version 1(零停机!)
-curl -X POST 'http://127.0.0.1:8082/v1/rulesets/app-business:rollback?to_version=1'
+curl -X POST 'http://127.0.0.1:8082/v1/rulesets/sysid-routing:rollback?to_version=1'
 
 # 手动强制 reload ruleset
-curl -X POST http://127.0.0.1:8082/v1/rulesets/app-business:reload
+curl -X POST http://127.0.0.1:8082/v1/rulesets/sysid-routing:reload
 
 # 实时运行状态(吞吐/队列深度/WAL 状态)
 curl -s http://127.0.0.1:8082/v1/stats
@@ -1352,7 +1299,7 @@ curl -s http://127.0.0.1:8082/v1/businesses
 
 ```bash
 # 直接通过 Admin API 更新 ruleset,无需改文件 + 重启
-curl -X PUT http://127.0.0.1:8082/v1/rulesets/app-business \
+curl -X PUT http://127.0.0.1:8082/v1/rulesets/sysid-routing \
   -H "Content-Type: application/yaml" \
   --data-binary @new-rules.yaml
 
@@ -1402,9 +1349,9 @@ sudo systemctl restart prom-gw@bj
 
 ```bash
 # Ruleset 版本回滚 → Admin API,零停机
-curl -s http://127.0.0.1:8082/v1/rulesets/app-business/history
+curl -s http://127.0.0.1:8082/v1/rulesets/sysid-routing/history
 # 选择 to_version=N 执行 rollback
-curl -X POST "http://127.0.0.1:8082/v1/rulesets/app-business:rollback?to_version=1"
+curl -X POST "http://127.0.0.1:8082/v1/rulesets/sysid-routing:rollback?to_version=1"
 
 # Token 配置回滚 → 文件回退 + SIGHUP
 sudo cp /appdata/prom-gw/conf/tokens.yaml.bak /appdata/prom-gw/conf/tokens.yaml
@@ -1846,18 +1793,18 @@ ExecStart=/appdata/prom-gw/bin/prom-gw \
 ```yaml
 # Nacos dataId: prom-gw-rules,group: GATEWAY
 rulesets:
-  - name: app-business
-    business: app-business
-    default_topic: prom.bj.routed.app_business
+  - name: sysid-routing
+    business: s-systems
+    default_topic: prom.bj.routed.default
     version: 3
     stages:
       - type: relabel
         drop_labels: [env, instance, pod]
       - type: route
         rules:
-          - { team: core,  topic: prom.bj.routed.core }
-          - { team: infra, topic: prom.bj.routed.infra }
-          - { team: data,  topic: prom.bj.routed.data }
+          - { sysid: s001, topic: prom.bj.routed.s001 }
+          - { sysid: s002, topic: prom.bj.routed.s002 }
+          - { sysid: s003, topic: prom.bj.routed.s003 }
 ```
 
 #### 19.4 Config Manager 多源优先级(三级降级)
@@ -1875,7 +1822,7 @@ FileSource (--config 路径,fsnotify 监听)
   ▼
 DefaultSource (内置空 ruleset,全量透传)
   │ 只有 Nacos + File 都失败才启用
-  │ 行为:所有 samples 按 ruleset 的 default_topic(来自 token)透传到 Kafka
+  │ 行为:所有 samples 按空 ruleset 处理,route 不做分桶,最终 topic 由 ruleset.default_topic 兜底
 ```
 
 **关键行为**:
@@ -1903,12 +1850,9 @@ prom-gw **禁止 auto-create topic**,所有 routed topics 必须预先用 `kafka
 
 | Topic | 分区 | 副本 | 用途 | 写入来源 |
 |-------|------|------|------|----------|
-| `prom.bj.routed.app_business` | 64 | 3 | 北京 app-business 兜底 topic | route 未命中的 samples |
-| `prom.bj.routed.core` | 64 | 3 | 北京核心业务(订单/支付/账户) | route: `team=core` |
-| `prom.bj.routed.infra` | 64 | 3 | 北京基础设施 | route: `team=infra` |
-| `prom.bj.routed.data` | 64 | 3 | 北京数据平台 | route: `team=data` |
-| `prom.bj.routed.s001` | 64 | 3 | 北京 S 系统 001 | route: `sysid=s001` |
-| `prom.bj.routed.s002` | 64 | 3 | 北京 S 系统 002 | route: `sysid=s002` |
+| `prom.bj.routed.s001` | 64 | 3 | 北京 S 系统 s001 | route: `sysid=s001` |
+| `prom.bj.routed.s002` | 64 | 3 | 北京 S 系统 s002 | route: `sysid=s002` |
+| `prom.bj.routed.s003` | 64 | 3 | 北京 S 系统 s003(示例) | route: `sysid=s003` |
 | `prom.bj.routed.default` | 64 | 3 | 北京 S 系统兜底(未匹配 sysid) | sysid-routing ruleset default_topic |
 | `prom.sz.routed.*`(同上) | 64 | 3 | 深圳机房 | Prometheus remote_write → prom-gw@sz → sz Kafka |
 | `prom.hf.routed.*`(同上) | 64 | 3 | 合肥机房 | 同上 |

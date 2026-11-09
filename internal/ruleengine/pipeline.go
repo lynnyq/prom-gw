@@ -11,14 +11,19 @@ package ruleengine
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
+	"github.com/klauspost/compress/snappy"
 	"github.com/lynnyq/prom-gw/internal/obs"
 	"github.com/lynnyq/prom-gw/internal/parser"
 	"github.com/lynnyq/prom-gw/internal/sink"
 	"github.com/lynnyq/prom-gw/pkg/tracex"
+	"github.com/prometheus/prometheus/prompb"
 	"go.uber.org/zap"
 )
 
@@ -31,6 +36,13 @@ import (
 //   - nil: 已入下游
 //   - 其他: 下游背压/失败,接收端映射 503
 type SinkFunc func(ctx context.Context, msg sink.Message) error
+
+// sampleWithTopic 内部辅助类型:把一个 sample 和它的目标 topic 绑在一起。
+// 用于按 TargetTopic 分桶,以及 buildPerTopicPayloads 的入参。
+type sampleWithTopic struct {
+	s     parser.Sample
+	topic string
+}
 
 // Pipeline 规则引擎流水线。
 //
@@ -221,28 +233,183 @@ func (p *Pipeline) Process(ctx context.Context, samples []parser.Sample, raw []b
 		zap.String("default_topic", defaultTopic),
 	)
 
-	// 每 sample 一次 out,key 各自用 seriesKey(同 series 落同 partition,顺序保留)
+	// 2.1 按 TargetTopic 分桶
+	perTopic := make(map[string][]sampleWithTopic, 4)
 	for _, s := range cur {
 		topic := s.TargetTopic
 		if topic == "" {
 			topic = defaultTopic
 		}
-		m := msg
-		m.Topic = topic
-		m.Key = []byte(strconv.FormatUint(s.SeriesKey(), 10))
-		m.Payload = raw
-		if err := p.out(ctx, m); err != nil {
-			obs.ErrorsTotal.WithLabelValues("rule", "send", ingestCity, sourceDC).Inc()
-			obs.SamplesTotal.WithLabelValues("rule", business, "error", ingestCity, sourceDC).Add(float64(nOut))
-			obs.StageDuration.WithLabelValues("rule", "error", ingestCity).Observe(time.Since(start).Seconds())
-			span.RecordError(err)
-			return err
-		}
-		obs.SamplesTotal.WithLabelValues("rule", business, "ok", ingestCity, sourceDC).Add(1)
+		perTopic[topic] = append(perTopic[topic], sampleWithTopic{s: s, topic: topic})
 	}
+
+	// 2.2 构造 per-topic payloads:为每个 topic 生成只包含匹配 TimeSeries 的 WriteRequest
+	// 只有 1 个 topic 桶时走 fast path(raw 不变,无需编解码)
+	var perTopicPayloads map[string][]byte
+	if len(perTopic) == 1 {
+		// fast path: 单 topic,所有 sample 共享同一个 WriteRequest,payload 不变
+	} else {
+		var err error
+		perTopicPayloads, err = buildPerTopicPayloads(raw, perTopic)
+		if err != nil {
+			// 构造失败 → fallback: 使用原始 raw(多 topic 共享同一 payload,会有 topic 污染但不丢数)
+			p.logger.Warn("rule pipeline: build per-topic payloads failed, fallback to shared raw",
+				zap.Error(err))
+			perTopicPayloads = nil
+		}
+	}
+
+	// 2.3 投递: 每 sample 一次 out,key 用 seriesKey(同 series 落同 partition,顺序保留)
+	okCount := int64(0)
+	for topic, bucket := range perTopic {
+		var topicPayload []byte
+		if perTopicPayloads != nil {
+			topicPayload = perTopicPayloads[topic]
+		} else {
+			topicPayload = raw
+		}
+		for _, swt := range bucket {
+			m := msg
+			m.Topic = topic
+			m.Key = []byte(strconv.FormatUint(swt.s.SeriesKey(), 10))
+			m.Payload = topicPayload
+			if err := p.out(ctx, m); err != nil {
+				obs.ErrorsTotal.WithLabelValues("rule", "send", ingestCity, sourceDC).Inc()
+				obs.SamplesTotal.WithLabelValues("rule", business, "error", ingestCity, sourceDC).Add(float64(nOut))
+				obs.StageDuration.WithLabelValues("rule", "error", ingestCity).Observe(time.Since(start).Seconds())
+				span.RecordError(err)
+				return err
+			}
+			okCount++
+		}
+	}
+	obs.SamplesTotal.WithLabelValues("rule", business, "ok", ingestCity, sourceDC).Add(float64(okCount))
 
 	obs.StageDuration.WithLabelValues("rule", "ok", ingestCity).Observe(time.Since(start).Seconds())
 	return nil
+}
+
+// buildPerTopicPayloads 从原始 snappy 压缩的 WriteRequest body 中构造 per-topic payload。
+//
+// 根因修复: 当 route stage 把同一 WriteRequest 中的不同 series 路由到不同 topic 时,
+// 原实现把完整 raw (含所有 series) 发给每个 topic,导致 topic 污染。
+//
+// 本函数:
+//  1. snappy 解压 raw → protobuf 字节
+//  2. protobuf unmarshal → prompb.WriteRequest
+//  3. 对每个 topic,按 sample 的 (metric, labels) 签名匹配对应的 TimeSeries
+//  4. 构造只含匹配 series 的新 WriteRequest → protobuf marshal → snappy compress
+//
+// 返回: topic → snappy 压缩的 WriteRequest 字节
+func buildPerTopicPayloads(raw []byte, perTopic map[string][]sampleWithTopic) (map[string][]byte, error) {
+	// 1. snappy 解压
+	protoBytes, err := snappy.Decode(nil, raw)
+	if err != nil {
+		return nil, fmt.Errorf("snappy decode: %w", err)
+	}
+	// 2. protobuf unmarshal
+	var req prompb.WriteRequest
+	if err := proto.Unmarshal(protoBytes, &req); err != nil {
+		return nil, fmt.Errorf("protobuf unmarshal: %w", err)
+	}
+
+	// 3. 为每个 sample 计算签名,按 topic 收集
+	type sampleKeySet = map[string]struct{}
+	topicKeys := make(map[string]sampleKeySet, len(perTopic))
+	for topic, bucket := range perTopic {
+		keys := make(sampleKeySet, len(bucket))
+		for _, swt := range bucket {
+			keys[sampleSignature(swt.s)] = struct{}{}
+		}
+		topicKeys[topic] = keys
+	}
+
+	// 4. 遍历 req.Timeseries,按签名匹配分桶
+	type tsIdx = int
+	topicTimeSeries := make(map[string][]tsIdx, len(perTopic))
+	for tsIdx, ts := range req.Timeseries {
+		key := timeSeriesSignature(&ts)
+		for topic, keys := range topicKeys {
+			if _, ok := keys[key]; ok {
+				topicTimeSeries[topic] = append(topicTimeSeries[topic], tsIdx)
+				break
+			}
+		}
+	}
+
+	// 5. 为每个 topic 构造新 WriteRequest 并编码
+	result := make(map[string][]byte, len(perTopic))
+	for topic, indices := range topicTimeSeries {
+		if len(indices) == 0 {
+			continue
+		}
+		newReq := prompb.WriteRequest{
+			Timeseries: make([]prompb.TimeSeries, 0, len(indices)),
+		}
+		for _, idx := range indices {
+			newReq.Timeseries = append(newReq.Timeseries, req.Timeseries[idx])
+		}
+		// protobuf marshal
+		newProto, err := proto.Marshal(&newReq)
+		if err != nil {
+			return nil, fmt.Errorf("protobuf marshal for topic %s: %w", topic, err)
+		}
+		// snappy compress
+		newSnappy := snappy.Encode(nil, newProto)
+		result[topic] = newSnappy
+	}
+	return result, nil
+}
+
+// sampleSignature 为 parser.Sample 计算唯一签名: metric + "|" + sorted labels 的 name=value 拼接。
+//
+// 用于与 prompb.TimeSeries 的 timeSeriesSignature 匹配,两者语义一致:
+//   - metric 来自 __name__ label(prompb) 或直接是 Sample.Metric
+//   - labels 按 name 排序后拼接,保证稳定签名
+//   - label value 统一转小写 → sysid 等 ID 标签大小写不敏感匹配
+func sampleSignature(s parser.Sample) string {
+	labels := make([]parser.Label, len(s.Labels))
+	copy(labels, s.Labels)
+	sort.Slice(labels, func(i, j int) bool {
+		return labels[i].Name < labels[j].Name
+	})
+	buf := make([]byte, 0, 128)
+	buf = append(buf, strings.ToLower(s.Metric)...)
+	for _, l := range labels {
+		buf = append(buf, '|')
+		buf = append(buf, l.Name...)
+		buf = append(buf, '=')
+		buf = append(buf, strings.ToLower(l.Value)...)
+	}
+	return string(buf)
+}
+
+// timeSeriesSignature 为 prompb.TimeSeries 计算签名,与 sampleSignature 语义一致。
+//
+// 从 ts.Labels 中提取 __name__ 作为 metric,其余 labels 按 name 排序后拼接。
+// label value 统一转小写 → sysid 等 ID 标签大小写不敏感匹配。
+func timeSeriesSignature(ts *prompb.TimeSeries) string {
+	var metric string
+	labels := make([]prompb.Label, 0, len(ts.Labels))
+	for _, l := range ts.Labels {
+		if l.Name == "__name__" {
+			metric = l.Value
+		} else {
+			labels = append(labels, l)
+		}
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		return labels[i].Name < labels[j].Name
+	})
+	buf := make([]byte, 0, 128)
+	buf = append(buf, strings.ToLower(metric)...)
+	for _, l := range labels {
+		buf = append(buf, '|')
+		buf = append(buf, l.Name...)
+		buf = append(buf, '=')
+		buf = append(buf, strings.ToLower(l.Value)...)
+	}
+	return string(buf)
 }
 
 // groupByTopic 把 samples 按 TargetTopic 分组,返回 topic → 命中数(用于 metric 统计)。

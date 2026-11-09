@@ -8,6 +8,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -115,7 +116,9 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
     /**
      * sysid 表路由构造器。
      *
-     * @param sysidTableMap sysid → 表名映射;为 null 或空时退化为单表模式
+     * @param sysidTableMap sysid → 表名映射;为 null 或空时退化为单表模式。
+     *                      构造时会把所有 key 归一化为小写(与 ExpandWriteRequest 提取
+     *                      sysid 时的 toLowerCase 对齐),查找时大小写不敏感。
      * @param defaultTable  sysid 不在映射表中时的兜底表;为 null/空时丢弃未知 sysid 数据
      */
     public BufferingStarRocksSink(
@@ -135,8 +138,20 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
         this.dlqHandler = dlqHandler;
         this.batchSize = batchSize;
         this.batchIntervalMs = batchIntervalMs;
-        this.sysidTableMap = sysidTableMap != null ? sysidTableMap : new HashMap<>();
+        // 归一化:sysid → 表名的 key 统一转小写,保证查找时大小写不敏感
+        this.sysidTableMap = normalizeSysidTableMap(sysidTableMap);
         this.defaultTable = defaultTable;
+    }
+
+    /** normalizeSysidTableMap 把 sysidTableMap 的 key 统一转小写。 */
+    private static Map<String, String> normalizeSysidTableMap(Map<String, String> input) {
+        Map<String, String> normalized = new HashMap<>();
+        if (input != null) {
+            for (Map.Entry<String, String> e : input.entrySet()) {
+                normalized.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
+            }
+        }
+        return normalized;
     }
 
     /** isMultiTable 是否为 sysid 多表路由模式。 */
@@ -238,12 +253,15 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
     /**
      * resolveTable 根据 AggResult.sysid 解析目标 StarRocks 表名。
      *
+     * 查找逻辑:sysid 统一转小写后在 sysidTableMap 中查找
+     * (map 的 key 也在构造时已归一化为小写,保证大小写不敏感)。
+     *
      * @return 目标表名;若 sysid 不在映射中且无 defaultTable 则返回 null
      */
     String resolveTable(AggResult r) {
         String sysid = r.getSysid();
         if (sysid != null && !sysid.isEmpty()) {
-            String tbl = sysidTableMap.get(sysid);
+            String tbl = sysidTableMap.get(sysid.toLowerCase(Locale.ROOT));
             if (tbl != null && !tbl.isEmpty()) {
                 return tbl;
             }

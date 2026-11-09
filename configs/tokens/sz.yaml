@@ -8,18 +8,16 @@
 #
 # token 只负责鉴权(身份 + 限流),topic 路由完全由 rules
 # (ruleset.default_topic + route stage) 负责,不再在此处配置。
+#
+# 架构:单一 business "s-systems" 覆盖所有 S 系统,
+#       具体 topic 由 sysid-routing ruleset 按 sysid 分桶。
 # ============================================================
 tokens:
-  # ── app-business 业务 ──
-  # 业务应用指标:CPU/内存/QPS/RT/错误率 等
-  "tk_app_business_prod":
-    business: app-business
-    business_id: "1001"
-    rate_limit: 80000                             # samples/s 上限,超过返回 429
-
-  # ── infra 业务 ──
-  # 基础设施指标:主机/网络/存储/容器 等
-  "tk_infra_prod":
-    business: infra
-    business_id: "1002"
-    rate_limit: 50000
+  # ── S 系统(sysid 分桶)业务 ──
+  # Prometheus 携带 sysid 标签的 S 系统指标,
+  # 由 sysid-routing ruleset 按 sysid 路由到 prom.sz.routed.<sysid>。
+  # 新增 S 系统:在 ruleset 的 route stage 追加 match + topic 即可,无需改 token。
+  "tk_systems_prod":
+    business: s-systems
+    business_id: "1003"
+    rate_limit: 200000                              # S 系统总量级较大,放宽限流
