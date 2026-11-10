@@ -261,10 +261,28 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
     String resolveTable(AggResult r) {
         String sysid = r.getSysid();
         if (sysid != null && !sysid.isEmpty()) {
-            String tbl = sysidTableMap.get(sysid.toLowerCase(Locale.ROOT));
+            String normalized = sysid.toLowerCase(Locale.ROOT);
+            String tbl = sysidTableMap.get(normalized);
             if (tbl != null && !tbl.isEmpty()) {
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug("resolveTable: sysid={} → table={} (matched)", sysid, tbl);
+                }
                 return tbl;
             }
+            // sysid 存在但不在映射表中 → fallback default
+            if (LOG.isDebugEnabled()) {
+                LOG.debug("resolveTable: sysid={} not in sysidTableMap, falling to defaultTable={}"
+                                + " (configured keys: {})",
+                        sysid, defaultTable, sysidTableMap.keySet());
+            } else {
+                LOG.info("resolveTable: sysid={} not in sysidTableMap, falling to defaultTable={}",
+                        sysid, defaultTable);
+            }
+        } else {
+            // sysid 为 null 或空 → 数据端没打 sysid label
+            LOG.warn("resolveTable: sysid is null/empty for metric={}, falling to defaultTable={}"
+                            + " → 请检查 prom-gw route stage 是否正确注入 sysid",
+                    r.getMetric(), defaultTable);
         }
         // fallback 到 defaultTable
         if (defaultTable != null && !defaultTable.isEmpty()) {
@@ -497,17 +515,23 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
         return String.format("%s_%s_%s_%s_%s", labelPrefix, ts, sysid, r.getBusiness(), hash);
     }
 
-    /** toJson 把 AggResult 转为 StarRocks Stream Load 期望的 JSON(与 StarRocksSink 对齐)。 */
+    /** toJson 把 AggResult 转为 StarRocks Stream Load 期望的 JSON(与 StarRocksSink 对齐)。
+     *
+     * null 值安全:StarRocks 表列通常定义为 VARCHAR NOT NULL DEFAULT '',
+     * null 值会被 quality filter 过滤掉(NumberFilteredRows++),甚至触发
+     * 默认 max_filter_ratio=0 导致整批失败。因此 String 类型列统一输出空串而非 null。
+     */
     private String toJson(AggResult r) throws Exception {
         Map<String, Object> m = new LinkedHashMap<>(16);
         m.put("ts", tsFmt.format(r.getTs()));
-        m.put("metric", r.getMetric());
-        m.put("business", r.getBusiness());
-        m.put("ingest_city", r.getIngestCity());
-        m.put("source_dc", r.getSourceDc());
-        m.put("sysid", r.getSysid());
-        m.put("labels_hash", r.getLabelsHash());
-        m.put("labels", r.getLabels());
+        m.put("metric", emptyIfNull(r.getMetric()));
+        m.put("business", emptyIfNull(r.getBusiness()));
+        m.put("ingest_city", emptyIfNull(r.getIngestCity()));
+        m.put("source_dc", emptyIfNull(r.getSourceDc()));
+        // sysid 若为 null → 输出空串,避免 StarRocks VARCHAR NOT NULL 列被 quality filter 过滤
+        m.put("sysid", emptyIfNull(r.getSysid()));
+        m.put("labels_hash", emptyIfNull(r.getLabelsHash()));
+        m.put("labels", r.getLabels() != null ? r.getLabels() : new LinkedHashMap<String, String>());
         m.put("sample_count", r.getSampleCount());
         m.put("value_sum", r.getValueSum());
         m.put("value_max", r.getValueMax());
@@ -516,5 +540,10 @@ public class BufferingStarRocksSink extends RichSinkFunction<AggResult>
         m.put("value_p50", r.getValueP50());
         m.put("value_p99", r.getValueP99());
         return mapper.writeValueAsString(m);
+    }
+
+    /** emptyIfNull null → 空串,否则原样返回。避免 StarRocks VARCHAR NOT NULL 列被 filter。 */
+    private static String emptyIfNull(String s) {
+        return s != null ? s : "";
     }
 }

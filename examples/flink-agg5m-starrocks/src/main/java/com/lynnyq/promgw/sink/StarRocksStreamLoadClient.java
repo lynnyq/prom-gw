@@ -219,7 +219,14 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
         }
     }
 
-    /** buildPutRequest 构造 Stream Load PUT 请求,含统一的 headers 与 body。 */
+    /** buildPutRequest 构造 Stream Load PUT 请求,含统一的 headers 与 body。
+     *
+     * 关键 header:
+     *   - max_filter_ratio:0.1 — 允许最多 10% 的行被 StarRocks quality filter 过滤(列类型
+     *     不匹配、缺列等)。StarRocks Stream Load 默认 max_filter_ratio=0,只要有 1 行被过滤
+     *     就 Status=Fail 整体失败。线上 180 行里 1 行 filtered 导致整批失败,加 0.1 兜底。
+     *   - Format:json + strip_outer_array:true — JSON 数组格式,无需 _source 包裹。
+     */
     private HttpPut buildPutRequest(String url, String label, byte[] body, boolean gzip) {
         HttpPut put = new HttpPut(url);
         put.setConfig(requestConfig);
@@ -228,6 +235,8 @@ public class StarRocksStreamLoadClient implements AutoCloseable {
         put.setHeader("Format", "json");
         put.setHeader("strip_outer_array", "true");
         put.setHeader("Expect", "100-continue");
+        // 允许最多 10% 的行被过滤(列类型不匹配等),避免单条脏数据导致整批失败
+        put.setHeader("max_filter_ratio", "0.1");
         if (gzip) {
             put.setHeader("Content-Encoding", "gzip");
         }

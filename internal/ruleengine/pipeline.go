@@ -265,6 +265,13 @@ func (p *Pipeline) Process(ctx context.Context, samples []parser.Sample, raw []b
 		var topicPayload []byte
 		if perTopicPayloads != nil {
 			topicPayload = perTopicPayloads[topic]
+			if topicPayload == nil {
+				// 该 topic 在 per-topic payload 里没匹配到任何 TimeSeries → fallback raw
+				// (不会丢数据,只是可能有少量 topic 污染;理论上不应出现,但 defensive)
+				p.logger.Warn("rule pipeline: topic {} not found in perTopicPayloads, fallback to raw",
+					zap.String("topic", topic))
+				topicPayload = raw
+			}
 		} else {
 			topicPayload = raw
 		}
